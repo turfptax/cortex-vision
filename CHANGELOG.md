@@ -4,7 +4,20 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-05-06
+## [0.3.0] — 2026-05-06
+
+### Added — in-app debug + LM Studio discovery
+
+- `cortex_vision/logs.py` — bounded ring buffer (2000 lines) attached to root logger; same pattern cortex-desktop's Hub uses
+- `GET /api/video/logs` — recent log lines with optional level filter (debug/info/warning/error/critical). Used by the Plugins tab "View Logs" button
+- `POST /api/video/logs/level` — runtime debug toggle. Bump to DEBUG, reproduce, bump back. No restart needed
+- `DELETE /api/video/logs` — clear the ring buffer (handy before a fresh repro)
+- `GET /api/video/lmstudio/scan?hints=...` — probe likely OpenAI-compatible servers (localhost:1234, 127.0.0.1:1234, Ollama defaults, plus user-supplied hints) and report reachability + model lists. The cortex-desktop Configure form uses this for a "Discover LM Studio" dropdown
+- 20 new tests covering ring buffer bounds, level filtering, level toggle, URL normalization, scan dedup, server-type heuristic
+
+### Changed
+
+- Server lifespan now installs the log capture handler before initializing the DB so all startup logs are captured
 
 ### Added — persistent configuration for end-user installs
 

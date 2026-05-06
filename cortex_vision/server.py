@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from cortex_vision import __version__
 from cortex_vision import config as _cfg
+from cortex_vision import logs as _logs
 from cortex_vision.capture.ytdlp import VIDEO_EXTS
 from cortex_vision.models.schemas import VideoMode, VideoSession
 from cortex_vision.pipeline.batch import run_batch_pipeline
@@ -58,6 +59,9 @@ logger = logging.getLogger("cortex_vision.server")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan handler — runs once on startup, once on shutdown."""
+    # Install log capture FIRST so we record everything from here on.
+    _logs.install()
+
     db_path = db_module.init_schema()
     logger.info("Sessions DB ready at %s", db_path)
     app.state.db_path = db_path
@@ -464,6 +468,168 @@ async def _probe_openai_compat(
         }
     except (ValueError, AttributeError) as e:
         return {"reachable": True, "error": f"parsed badly: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Logs — in-memory ring buffer + debug-level toggle
+# ---------------------------------------------------------------------------
+
+_LOG_LEVEL_VALUES = ("debug", "info", "warning", "error", "critical")
+
+
+@app.get("/api/video/logs")
+async def get_logs(
+    lines: int = Query(200, ge=1, le=2000),
+    level: str | None = Query(
+        None,
+        description="Minimum level filter — debug | info | warning | error | critical",
+    ),
+) -> dict:
+    """Return recent sidecar log lines from the in-memory ring buffer.
+
+    Used by cortex-desktop's Plugins tab "View Logs" button so the user can
+    see what's happening without leaving the Hub. No file paths to memorize.
+    """
+    if level and level.lower() not in _LOG_LEVEL_VALUES:
+        raise HTTPException(
+            400, f"level must be one of {list(_LOG_LEVEL_VALUES)}"
+        )
+    return {
+        "lines": _logs.get_recent(lines=lines, level=level),
+        "current_level": _logs.current_level(),
+        "buffered": _logs.total_buffered(),
+    }
+
+
+class LogLevelUpdate(BaseModel):
+    level: Literal["debug", "info", "warning", "error", "critical"]
+
+
+@app.post("/api/video/logs/level")
+async def set_log_level(req: LogLevelUpdate) -> dict:
+    """Bump the runtime log level — typically to `debug` when capturing
+    diagnostic output for a support ticket. Doesn't persist; the level
+    resets to INFO on next bundle restart.
+    """
+    canonical = _logs.set_level(req.level)
+    logger.info("log level changed to %s", canonical)
+    return {"level": canonical}
+
+
+@app.delete("/api/video/logs")
+async def clear_logs() -> dict:
+    """Empty the ring buffer. Useful before reproducing a bug so the
+    captured logs are scoped to just the repro window."""
+    before = _logs.total_buffered()
+    _logs.clear()
+    return {"cleared": before}
+
+
+# ---------------------------------------------------------------------------
+# LM Studio discovery — scan likely candidate URLs
+# ---------------------------------------------------------------------------
+
+# Common URLs we probe automatically. Anything else the user provides as
+# `hint` parameters gets added on top.
+_DEFAULT_LMSTUDIO_CANDIDATES = (
+    "http://localhost:1234/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://localhost:11434/v1",      # Ollama default port
+    "http://127.0.0.1:11434/v1",
+)
+
+
+@app.get("/api/video/lmstudio/scan")
+async def scan_lmstudio(
+    hints: list[str] = Query(
+        default=[],
+        description="Additional URLs to probe (e.g. cortex-desktop's known LM Studio host). "
+                    "Accepts full URL, host:port, or bare host (assumes :1234/v1).",
+    ),
+    timeout: float = Query(2.0, ge=0.5, le=10.0),
+) -> dict:
+    """Probe a list of likely LM Studio (or any OpenAI-compatible) servers
+    and return the reachable ones with their model lists.
+
+    The cortex-desktop Settings UI uses this to populate a "Discover LM Studio"
+    dropdown next to the URL field — user clicks Scan, picks from the list,
+    saves. Beats memorizing or copy-pasting URLs.
+
+    Probes default localhost candidates plus any `hints` provided by the
+    caller (cortex-desktop knows about its own LM Studio from the Hub's
+    network scan; passing that as a hint surfaces it here too).
+    """
+    candidates: list[str] = list(_DEFAULT_LMSTUDIO_CANDIDATES)
+    for h in hints:
+        candidates.append(_normalize_lmstudio_url(h))
+    # Dedupe while preserving order
+    seen: set[str] = set()
+    unique = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    import asyncio
+    probes = await asyncio.gather(
+        *[_probe_one_lmstudio(url, timeout) for url in unique],
+        return_exceptions=False,
+    )
+    return {
+        "candidates": probes,
+        "reachable_count": sum(1 for p in probes if p["reachable"]),
+    }
+
+
+def _normalize_lmstudio_url(value: str) -> str:
+    """Turn 'host', 'host:port', or 'http://host:port' into a full v1 URL."""
+    s = value.strip()
+    if not s.startswith("http"):
+        s = f"http://{s}"
+    # If no port given, append :1234
+    from urllib.parse import urlparse
+    parsed = urlparse(s)
+    if not parsed.port:
+        s = f"{parsed.scheme}://{parsed.hostname}:1234"
+    if "/v1" not in s:
+        s = s.rstrip("/") + "/v1"
+    return s
+
+
+async def _probe_one_lmstudio(url: str, timeout: float) -> dict[str, Any]:
+    """Single-URL probe. Returns reachability + models on success, error on failure."""
+    import httpx
+
+    out: dict[str, Any] = {"url": url, "reachable": False}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(f"{url.rstrip('/')}/models")
+        if r.status_code >= 400:
+            out["error"] = f"HTTP {r.status_code}"
+            return out
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        items = data.get("data", []) if isinstance(data, dict) else []
+        models = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+        out.update({
+            "reachable": True,
+            "models": models,
+            "model_count": len(models),
+            # Try to identify the server type from typical model id patterns
+            "likely_server": _guess_server_type(models),
+        })
+    except httpx.RequestError as e:
+        out["error"] = type(e).__name__
+    except (ValueError, KeyError) as e:
+        out["error"] = f"parse error: {e}"
+    return out
+
+
+def _guess_server_type(models: list[str]) -> str | None:
+    """Heuristic guess at server type from the loaded models."""
+    if not models:
+        return None
+    joined = " ".join(models).lower()
+    if any(k in joined for k in ("smolvlm", "llava", "qwen", "lmstudio")):
+        return "lm-studio"
+    if any(k in joined for k in ("llama3.2", "qwen2", "phi3")) and "ollama" in joined:
+        return "ollama"
+    return "openai-compatible"
 
 
 # ---------------------------------------------------------------------------
