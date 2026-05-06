@@ -4,6 +4,84 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-06
+
+### Added — desktop audio capture in live mode + post-stop transcription
+
+Live mode now captures audio alongside video. User picks at session start: **Desktop audio** (WASAPI loopback on the default Windows output — captures the system mix exactly as you hear it, no VB-Audio CABLE needed) or a specific **microphone**. Audio is recorded to `<session_dir>/audio.wav` continuously; on Stop, whisper.cpp transcribes the full recording and buckets segments per scene.
+
+#### New module: `cortex_vision/audio/loopback.py`
+
+- `AudioCapture` — sounddevice-backed continuous WAV writer. 16 kHz mono output. Internal linear resampler handles native-rate (e.g. 48 kHz stereo) → 16 kHz mono on the fly. Periodic RMS callback at ~10 Hz for the live audio level meter.
+- `list_input_devices()` — returns the default WASAPI output (as a loopback target with sentinel `index=-1`) plus all real input devices. Powers the audio source dropdown.
+- `_resolve_device()` — translates user-facing spec (None / "desktop" / int / name substring) into sounddevice index + loopback flag.
+
+#### Live pipeline integration (`cortex_vision/pipeline/live.py`)
+
+- New `LivePipelineConfig.audio_source` (None / "desktop" / int / str) and `transcribe_audio: bool` fields
+- Audio capture spawned alongside video capture in `start()`, finalized in `stop()`
+- Audio-thread RMS callbacks emit `{"type": "audio_level", "rms": ..., "peak": ...}` events for the UI meter
+- After all threads stop, if `transcribe_audio=True`, runs whisper.cpp on the recorded WAV via the existing v0.3.5 provider chain
+- Transcript segments persisted to the session and bucketed per scene via `bucket_segments_by_scene()` — each scene's `spoken_text` field gets the audio that played during its time window
+
+#### New WebSocket events
+
+```jsonc
+{"type": "audio_level", "rms": 0.045, "peak": 0.12}              // ~10 Hz
+{"type": "transcribing", "audio_duration_s": 202.0}              // after Stop, whisper running
+{"type": "transcribed", "provider": "whisper_cpp",
+                        "segment_count": 47,
+                        "scenes_with_audio": 12}                  // when post-process done
+{"type": "transcribe_skipped", "reason": "no_whisper_provider"}  // graceful skip
+{"type": "transcribe_failed", "message": "..."}                  // post-process failure
+```
+
+`stopped` event also gains `audio_recorded: bool` and `audio_duration_s: float`.
+
+#### New endpoint
+
+- `GET /api/video/live/audio-devices` — lists capture sources for the picker
+
+#### `POST /api/video/live/start` accepts new fields
+
+- `audio_source: int | str | null` (default null = video-only)
+- `transcribe_audio: bool` (default false)
+
+### Fixed — whisper-cli detection covers cortex-desktop's bundled install
+
+v0.3.5 only checked `%APPDATA%\Cortex\whisper-cpp\whisper-cli.exe` for the binary, but cortex-desktop's official installer bundles whisper-cli inside its own PyInstaller install at `<install>\_internal\backend\bin\whisper-cli.exe`. `find_whisper_cli()` now searches a 4-tier order:
+
+1. `CORTEX_VISION_WHISPER_CLI` env var (explicit override)
+2. cortex-desktop install paths:
+   - `%ProgramFiles(x86)%\CortexHub\_internal\backend\bin\whisper-cli.exe`
+   - `%ProgramFiles%\CortexHub\_internal\backend\bin\whisper-cli.exe`
+   - `%LOCALAPPDATA%\Programs\CortexHub\_internal\backend\bin\whisper-cli.exe`
+3. `%APPDATA%\Cortex\whisper-cpp\whisper-cli.exe` (manual install fallback)
+4. `shutil.which("whisper-cli")` (PATH lookup)
+
+This was the actual reason "Transcribe audio" silently did nothing in v0.3.5 even when cortex-desktop's overseer had the model installed.
+
+### Bundling
+
+- `sounddevice>=0.4.6` moved from `[cpu]/[gpu]` extras to **core deps** so the PyInstaller bundle picks it up unconditionally
+- Spec updated to collect_all `sounddevice` + `_sounddevice_data` (portaudio DLL ships inside the wheel)
+- `_cffi_backend` added as explicit hidden import (sounddevice loads via cffi)
+
+### Tests — 33 new (196 total passing)
+
+- Resampler: passthrough, 48k→16k downsample, stereo→mono downmix, empty input
+- Device resolution: None → loopback, int → input, string match → input or loopback by category
+- list_input_devices: includes desktop loopback sentinel + real inputs, graceful empty when sounddevice missing
+- AudioCapture lifecycle: writes valid 16 kHz mono WAV, idempotent close, open-failure cleanup
+- find_whisper_cli: env override, ProgramFiles, ProgramFiles(x86), missing APPDATA path
+- Audio devices endpoint integration
+
+### What this changes for the user
+
+Before v0.4.0: Live mode was video-only; "Transcribe audio" worked for File/Journal modes but only if whisper.cpp was at the manual-install path.
+
+After v0.4.0: Live mode can record system audio (or a mic), and transcription auto-detects cortex-desktop's whisper.cpp install. End-to-end live mode with overseer-quality transcripts works without any CLI configuration.
+
 ## [0.3.5] — 2026-05-06
 
 ### Added — local whisper.cpp transcription via cortex-desktop's install

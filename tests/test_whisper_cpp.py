@@ -17,18 +17,26 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch, tmp_path):
-    """Each test gets a fresh fake APPDATA so we never touch the real one."""
+    """Each test gets fresh fake APPDATA / Program Files / etc. so we
+    never see the dev's real cortex-desktop install during testing."""
     fake_appdata = tmp_path / "AppData" / "Roaming"
     fake_appdata.mkdir(parents=True)
     monkeypatch.setenv("APPDATA", str(fake_appdata))
-    # Wipe other provider env vars that could leak in
+    # Wipe ALL paths v0.4.0's find_whisper_cli() searches.
+    # (Program Files / LocalAppData / shutil.which fallback)
     for var in (
+        "CORTEX_VISION_WHISPER_CLI",
         "CORTEX_VISION_WHISPER_URL",
         "CORTEX_VISION_WHISPER_KEY",
         "CORTEX_VISION_WHISPER_MODEL",
         "OPENAI_API_KEY",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
     ):
         monkeypatch.delenv(var, raising=False)
+    # Block shutil.which from finding whisper-cli on the real PATH
+    monkeypatch.setattr("shutil.which", lambda name: None)
     # Point the config file path at the fake location too
     monkeypatch.setattr(
         "cortex_vision.storage.db.default_db_path",
@@ -55,6 +63,70 @@ def test_find_whisper_cli_returns_path_when_present(_isolate_env):
     cli.write_bytes(b"#!fake whisper-cli")
 
     assert find_whisper_cli() == cli
+
+
+def test_find_whisper_cli_finds_cortex_desktop_install(monkeypatch, tmp_path):
+    """v0.4.0 fix: detect whisper-cli inside cortex-desktop's PyInstaller
+    install at <ProgramFiles>/CortexHub/_internal/backend/bin/whisper-cli.exe.
+    This is where the official cortex-desktop installer drops it."""
+    from cortex_vision.audio.transcribe import find_whisper_cli
+
+    program_files = tmp_path / "Program Files"
+    program_files.mkdir()
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+
+    bundle_bin = program_files / "CortexHub" / "_internal" / "backend" / "bin"
+    bundle_bin.mkdir(parents=True)
+    cli = bundle_bin / "whisper-cli.exe"
+    cli.write_bytes(b"#!fake")
+
+    # Wipe other env vars that could match
+    monkeypatch.delenv("CORTEX_VISION_WHISPER_CLI", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    assert find_whisper_cli() == cli
+
+
+def test_find_whisper_cli_finds_program_files_x86(monkeypatch, tmp_path):
+    """The user's actual install location: ProgramFiles(x86)/CortexHub/..."""
+    from cortex_vision.audio.transcribe import find_whisper_cli
+
+    pf86 = tmp_path / "ProgramFilesx86"
+    pf86.mkdir()
+    monkeypatch.setenv("ProgramFiles(x86)", str(pf86))
+
+    cli = pf86 / "CortexHub" / "_internal" / "backend" / "bin" / "whisper-cli.exe"
+    cli.parent.mkdir(parents=True)
+    cli.write_bytes(b"#!fake")
+
+    monkeypatch.delenv("CORTEX_VISION_WHISPER_CLI", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+
+    assert find_whisper_cli() == cli
+
+
+def test_find_whisper_cli_env_override_wins(monkeypatch, tmp_path):
+    """CORTEX_VISION_WHISPER_CLI takes precedence over all other paths."""
+    from cortex_vision.audio.transcribe import find_whisper_cli
+
+    explicit = tmp_path / "my-custom-whisper" / "whisper-cli.exe"
+    explicit.parent.mkdir(parents=True)
+    explicit.write_bytes(b"#!explicit")
+    monkeypatch.setenv("CORTEX_VISION_WHISPER_CLI", str(explicit))
+
+    # Also set up a CortexHub install — should be ignored in favor of env
+    pf = tmp_path / "ProgramFiles"
+    pf.mkdir()
+    bundle = pf / "CortexHub" / "_internal" / "backend" / "bin" / "whisper-cli.exe"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"#!ignored")
+    monkeypatch.setenv("ProgramFiles", str(pf))
+
+    assert find_whisper_cli() == explicit
 
 
 def test_find_whisper_cli_handles_missing_appdata(monkeypatch):

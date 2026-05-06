@@ -123,18 +123,61 @@ def _whisper_cpp_appdata_root() -> Path | None:
 
 
 def find_whisper_cli() -> Path | None:
-    """Return the path to a usable whisper-cli binary, or None.
+    r"""Return the path to a usable whisper-cli binary, or None.
 
-    Looks at the canonical location cortex-desktop installs whisper.cpp to.
-    Cross-referenced with cortex-desktop's `routers/transcribe.py` which
-    treats this same path as authoritative.
+    Search order (first match wins):
+
+      1. CORTEX_VISION_WHISPER_CLI env var — explicit override
+      2. cortex-desktop's PyInstaller install — where the overseer's
+         transcribe router actually bundles whisper-cli:
+           %ProgramFiles(x86)%\CortexHub\_internal\backend\bin\whisper-cli.exe
+           %ProgramFiles%\CortexHub\_internal\backend\bin\whisper-cli.exe
+           %LOCALAPPDATA%\Programs\CortexHub\_internal\backend\bin\whisper-cli.exe
+      3. %APPDATA%\Cortex\whisper-cpp\whisper-cli.exe — manual install fallback
+      4. PATH lookup via shutil.which
+
+    The cortex-desktop install paths are the most common source on
+    Windows; v0.3.5 only checked path #3 and missed every regular install.
     """
-    root = _whisper_cpp_appdata_root()
-    if root is None:
-        return None
     name = "whisper-cli.exe" if os.name == "nt" else "whisper-cli"
-    candidate = root / "whisper-cpp" / name
-    return candidate if candidate.is_file() else None
+
+    # 1. Explicit env override
+    env = os.environ.get("CORTEX_VISION_WHISPER_CLI", "").strip()
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+
+    # 2. cortex-desktop's PyInstaller install — the canonical Windows location
+    cortex_desktop_roots: list[Path] = []
+    for var in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        v = os.environ.get(var)
+        if not v:
+            continue
+        cortex_desktop_roots.append(Path(v) / "CortexHub")
+    # LOCALAPPDATA per-user installer convention
+    if localappdata := os.environ.get("LOCALAPPDATA"):
+        cortex_desktop_roots.append(Path(localappdata) / "Programs" / "CortexHub")
+
+    for root in cortex_desktop_roots:
+        candidate = root / "_internal" / "backend" / "bin" / name
+        if candidate.is_file():
+            return candidate
+
+    # 3. APPDATA/Cortex/whisper-cpp/ — manual install fallback (v0.3.5 path)
+    appdata_root = _whisper_cpp_appdata_root()
+    if appdata_root is not None:
+        candidate = appdata_root / "whisper-cpp" / name
+        if candidate.is_file():
+            return candidate
+
+    # 4. PATH lookup — last resort
+    import shutil
+    found = shutil.which(name)
+    if found:
+        return Path(found)
+
+    return None
 
 
 def find_whisper_model() -> Path | None:

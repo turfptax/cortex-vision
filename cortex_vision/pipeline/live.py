@@ -52,11 +52,20 @@ from typing import Any
 import cv2
 import numpy as np
 
+from cortex_vision.audio.loopback import AudioCapture
+from cortex_vision.audio.transcribe import (
+    WhisperUnavailable,
+    bucket_segments_by_scene,
+    is_configured as whisper_configured,
+    transcribe_file,
+)
 from cortex_vision.capture.camera import FrameCapture
 from cortex_vision.description.lmstudio_client import (
     LMStudioUnavailable,
     chat_with_images,
 )
+from cortex_vision.models.schemas import TranscriptEntry
+from datetime import datetime, timezone
 from cortex_vision.description.narrative import (
     SCENE_DESCRIBER_SYSTEM,
     build_scene_describer_prompt,
@@ -93,6 +102,16 @@ class LivePipelineConfig:
     min_scene_gap: float = 3.0
     describer_model: str | None = None
     keyframes_per_scene: int = 1                # for now we save 1 keyframe per scene
+    # ── Audio (v0.4.0) ───────────────────────────────────────────────
+    # audio_source semantics:
+    #   None     -> no audio capture (default, backward-compat)
+    #   "desktop"-> WASAPI loopback on the default Windows output device
+    #   int      -> sounddevice input device index (mic)
+    #   str      -> substring match on device name
+    audio_source: int | str | None = None
+    # If True, run whisper.cpp on the captured audio after Stop and
+    # bucket segments per scene. Requires audio_source != None.
+    transcribe_audio: bool = False
 
 
 class LivePipeline:
@@ -113,6 +132,12 @@ class LivePipeline:
         self._stats_thread: threading.Thread | None = None
         self._capture: FrameCapture | None = None
         self._detector: LiveSceneDetector | None = None
+
+        # Audio capture (v0.4.0). Optional — only spun up if config.audio_source
+        # is set. Audio is recorded continuously to <session_dir>/audio.wav and
+        # transcribed AFTER Stop (not in real time) for better quality.
+        self._audio_capture: AudioCapture | None = None
+        self._audio_path = self.session_dir / "audio.wav"
 
         # Job + event queues (thread-safe)
         self._describer_jobs: queue.Queue[tuple[int, list[str]]] = queue.Queue(
@@ -157,6 +182,29 @@ class LivePipeline:
         self.sm.update_status(self.config.session_id, "capturing")
         self._started_at = time.perf_counter()
 
+        # Audio capture (v0.4.0) — optional, opt-in via config.audio_source.
+        # Failure here is non-fatal: we log and continue with video-only.
+        if self.config.audio_source is not None:
+            try:
+                self._audio_capture = AudioCapture(
+                    out_path=self._audio_path,
+                    device=self.config.audio_source,
+                    on_level=self._handle_audio_level,
+                )
+                self._audio_capture.open()
+                logger.info(
+                    "session=%s audio source=%s -> %s",
+                    self.config.session_id, self.config.audio_source, self._audio_path,
+                )
+            except Exception as e:                       # noqa: BLE001
+                logger.exception("session=%s audio capture failed", self.config.session_id)
+                self._audio_capture = None
+                self._emit({
+                    "type": "error",
+                    "subsystem": "audio",
+                    "message": f"audio capture failed: {e}",
+                })
+
         # Launch threads
         self._detector.start()
         self._detector.resume()
@@ -187,7 +235,8 @@ class LivePipeline:
         )
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Signal all threads to stop and join. Idempotent."""
+        """Signal all threads to stop and join, then post-process audio.
+        Idempotent."""
         if self._stop.is_set():
             return
         self._stop.set()
@@ -202,6 +251,19 @@ class LivePipeline:
         if self._capture is not None:
             self._capture.close()
 
+        # Stop audio capture and finalize the WAV file
+        if self._audio_capture is not None:
+            try:
+                self._audio_capture.close()
+                logger.info(
+                    "session=%s audio captured %.1fs to %s",
+                    self.config.session_id,
+                    self._audio_capture.duration_s,
+                    self._audio_path,
+                )
+            except Exception:                            # noqa: BLE001
+                logger.exception("error closing audio capture")
+
         # Drain describer queue or wait for in-flight job to finish
         if self._describer_thread is not None:
             self._describer_thread.join(timeout=timeout)
@@ -209,10 +271,16 @@ class LivePipeline:
         if self._stats_thread is not None:
             self._stats_thread.join(timeout=timeout)
 
+        # Post-process transcription — runs synchronously after threads stop
+        # but before we emit the terminal "stopped" event. Keeps the contract
+        # simple: when the user sees "stopped", everything is persisted.
+        if self.config.transcribe_audio and self._audio_path.exists():
+            self._post_transcribe()
+
         # Move session to 'complete'
         try:
             self.sm.update_status(self.config.session_id, "complete")
-        except Exception:                                       # noqa: BLE001
+        except Exception:                                # noqa: BLE001
             logger.exception("failed to mark live session complete")
 
         elapsed = time.perf_counter() - self._started_at if self._started_at else 0
@@ -221,6 +289,11 @@ class LivePipeline:
             "session_id": self.config.session_id,
             "scene_count": self._scene_count,
             "duration_s": round(elapsed, 1),
+            "audio_recorded": self._audio_capture is not None,
+            "audio_duration_s": (
+                round(self._audio_capture.duration_s, 1)
+                if self._audio_capture else 0.0
+            ),
         })
         logger.info("session=%s stopped scenes=%d", self.config.session_id, self._scene_count)
 
@@ -425,6 +498,127 @@ class LivePipeline:
         except Exception as e:                           # noqa: BLE001
             logger.warning("scene %d describe raised %s", scene_index, type(e).__name__)
             return ("", label + ":error")
+
+    # ------------------------------------------------------------------
+    # Audio (v0.4.0)
+    # ------------------------------------------------------------------
+
+    def _handle_audio_level(self, rms: float, peak: float) -> None:
+        """Called ~10 Hz from the sounddevice audio thread. Emits a level
+        event for the UI meter. Both values are normalized [0, 1]."""
+        self._emit({
+            "type": "audio_level",
+            "rms": round(rms, 4),
+            "peak": round(peak, 4),
+        })
+
+    def _post_transcribe(self) -> None:
+        """Run whisper.cpp on the captured audio.wav after Stop, bucket
+        the resulting segments per scene, and persist them. Emits
+        `transcribing` before and `transcribed` after.
+
+        Failure here is non-fatal: the session still completes, just
+        without transcript data. We log + emit an error event for the UI.
+        """
+        if not whisper_configured():
+            logger.info(
+                "session=%s transcribe_audio=True but no whisper provider "
+                "configured — skipping post-transcribe",
+                self.config.session_id,
+            )
+            self._emit({
+                "type": "transcribe_skipped",
+                "reason": "no_whisper_provider",
+            })
+            return
+
+        self._emit({
+            "type": "transcribing",
+            "audio_duration_s": round(self._audio_capture.duration_s, 1)
+                if self._audio_capture else 0.0,
+        })
+
+        try:
+            result = transcribe_file(
+                self._audio_path,
+                # Allow up to 5 min processing time. whisper.cpp is roughly
+                # real-time on CPU; a 30-min recording could take 5-30 min
+                # depending on hardware. If the user wants more they can
+                # bump the bundle's CORTEX_VISION_WHISPER_TIMEOUT later.
+                timeout=600.0,
+            )
+        except (WhisperUnavailable, FileNotFoundError) as e:
+            logger.warning(
+                "session=%s transcription failed: %s",
+                self.config.session_id, e,
+            )
+            self._emit({
+                "type": "transcribe_failed",
+                "message": str(e),
+            })
+            return
+
+        # Persist transcript chunks
+        started_at_dt = datetime.now(timezone.utc)
+        for i, seg in enumerate(result.segments):
+            try:
+                self.sm.append_transcript(
+                    self.config.session_id,
+                    TranscriptEntry(
+                        timestamp=started_at_dt,
+                        text=seg.text,
+                        duration_s=max(0.0, seg.end_s - seg.start_s),
+                        chunk_index=i,
+                    ),
+                )
+            except Exception:                            # noqa: BLE001
+                logger.exception("failed to persist transcript chunk %d", i)
+
+        # Bucket segments per scene by START time. Each scene's window is
+        # [scene.start_s, scene.end_s) — for live mode end_s == start_s
+        # (point-in-time events), so we extend each window to the next
+        # scene's start so segments before the next scene change attribute
+        # to the previous scene.
+        scenes_in_db = self.sm.get(self.config.session_id)
+        if scenes_in_db is None:
+            return
+
+        windows: list[tuple[float, float]] = []
+        for i, sc in enumerate(scenes_in_db.scenes):
+            start = sc.start_s
+            end = (
+                scenes_in_db.scenes[i + 1].start_s
+                if i + 1 < len(scenes_in_db.scenes)
+                else (self._audio_capture.duration_s if self._audio_capture else start + 600)
+            )
+            windows.append((start, end))
+
+        per_scene = bucket_segments_by_scene(result.segments, windows)
+        for sc, spoken in zip(scenes_in_db.scenes, per_scene):
+            if spoken:
+                # Update the scene's spoken_text via partial update
+                # (the full re-write would clobber description/keyframes)
+                with __import__("sqlite3").connect(self.sm.db_path) as conn:
+                    conn.execute(
+                        "UPDATE scenes SET spoken_text = ? WHERE session_id = ? AND scene_index = ?",
+                        (spoken, self.config.session_id, sc.index),
+                    )
+
+        self._emit({
+            "type": "transcribed",
+            "provider": result.provider,
+            "model": result.model,
+            "segment_count": len(result.segments),
+            "scenes_with_audio": sum(1 for x in per_scene if x),
+            "char_count": len(result.full_text),
+        })
+        logger.info(
+            "session=%s transcribed: %d segments, %d/%d scenes got spoken_text",
+            self.config.session_id,
+            len(result.segments),
+            sum(1 for x in per_scene if x),
+            len(per_scene),
+        )
 
     # ------------------------------------------------------------------
     # Stats emitter (thread)

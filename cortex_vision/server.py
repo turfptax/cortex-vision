@@ -795,6 +795,16 @@ class LiveStartRequest(BaseModel):
     steady_interval: float = 30.0
     min_scene_gap: float = 3.0
     describer_model: str | None = None
+    # Audio (v0.4.0)
+    # audio_source:
+    #   None       -> no audio capture (default, video-only)
+    #   "desktop"  -> WASAPI loopback on default Windows output
+    #   <int>      -> sounddevice input device index (microphone)
+    #   <string>   -> substring match on input device name
+    audio_source: int | str | None = None
+    # If true, run whisper.cpp on the captured audio after Stop.
+    # Requires audio_source != None.
+    transcribe_audio: bool = False
 
 
 @app.get("/api/video/live/cameras")
@@ -806,6 +816,36 @@ async def live_cameras() -> dict:
     """
     from cortex_vision.capture.camera import describe_cameras
     return {"cameras": describe_cameras()}
+
+
+@app.get("/api/video/live/audio-devices")
+async def live_audio_devices() -> dict:
+    """List available audio capture sources for the LiveMode picker.
+
+    Includes:
+      - "Desktop audio" entry (index=-1) — WASAPI loopback on the default
+        Windows output device. Captures whatever is playing through the
+        speakers/headphones.
+      - All real input devices (microphones, line-ins, capture cards).
+
+    Frontend renders these in a dropdown; user picks one and we pass either
+    "desktop" (special-case None handling) or the device index to the
+    `audio_source` field of POST /api/video/live/start.
+    """
+    from cortex_vision.audio.loopback import list_input_devices
+    devices = list_input_devices()
+    return {
+        "devices": [
+            {
+                "index": d.index,
+                "name": d.name,
+                "max_input_channels": d.max_input_channels,
+                "default_samplerate": d.default_samplerate,
+                "is_default_output_loopback": d.is_default_output_loopback,
+            }
+            for d in devices
+        ]
+    }
 
 
 @app.post("/api/video/live/start", status_code=202)
@@ -838,6 +878,8 @@ async def live_start(req: LiveStartRequest) -> dict:
         steady_interval=req.steady_interval,
         min_scene_gap=req.min_scene_gap,
         describer_model=req.describer_model,
+        audio_source=req.audio_source,
+        transcribe_audio=req.transcribe_audio,
     )
 
     try:

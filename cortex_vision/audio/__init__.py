@@ -13,6 +13,11 @@ from cortex_vision.audio.ffmpeg_extract import (
     ffmpeg_available,
     has_audio_track,
 )
+from cortex_vision.audio.loopback import (
+    AudioCapture,
+    AudioDevice,
+    list_input_devices,
+)
 from cortex_vision.audio.transcribe import (
     TranscriptSegment,
     TranscriptionResult,
@@ -30,6 +35,9 @@ __all__ = [
     "extract_audio_track",
     "ffmpeg_available",
     "has_audio_track",
+    "AudioCapture",
+    "AudioDevice",
+    "list_input_devices",
     "TranscriptSegment",
     "TranscriptionResult",
     "WhisperUnavailable",

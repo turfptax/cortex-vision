@@ -69,6 +69,21 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
+# sounddevice + portaudio (v0.4.0): WASAPI loopback for live audio capture.
+# sounddevice ships its own portaudio DLL inside the wheel; collect_all
+# picks up both the Python module and the bundled native library.
+# ---------------------------------------------------------------------------
+try:
+    sd_datas, sd_binaries, sd_hidden = collect_all("sounddevice")
+except Exception:
+    sd_datas, sd_binaries, sd_hidden = [], [], []
+try:
+    cffi_datas, cffi_binaries, cffi_hidden = collect_all("_sounddevice_data")
+except Exception:
+    cffi_datas, cffi_binaries, cffi_hidden = [], [], []
+
+
+# ---------------------------------------------------------------------------
 # pydantic v2: some discriminated-union machinery loads via importlib.
 # pydantic_core is already a hard dep so it gets picked up automatically.
 # ---------------------------------------------------------------------------
@@ -132,6 +147,8 @@ a = Analysis(
         *scenedetect_binaries,
         *pygrabber_binaries,
         *comtypes_binaries,
+        *sd_binaries,
+        *cffi_binaries,
     ],
     datas=[
         # plugin.json sits next to the .exe so the plugin manager can read it
@@ -142,6 +159,8 @@ a = Analysis(
         *scenedetect_datas,
         *pygrabber_datas,
         *comtypes_datas,
+        *sd_datas,
+        *cffi_datas,
     ],
     hiddenimports=[
         *uvicorn_hidden,
@@ -154,6 +173,10 @@ a = Analysis(
         *ytdlp_postprocessor,
         *pygrabber_hidden,
         *comtypes_hidden,
+        *sd_hidden,
+        *cffi_hidden,
+        # sounddevice loads via cffi at runtime
+        "_cffi_backend",
     ],
     hookspath=[],
     hooksconfig={},

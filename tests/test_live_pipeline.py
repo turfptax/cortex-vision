@@ -413,6 +413,41 @@ def test_live_start_409_when_already_running(isolated_db, fake_cv2_open, stub_de
             c.post("/api/video/live/stop")
 
 
+def test_live_audio_devices_endpoint(monkeypatch):
+    """/live/audio-devices delegates to list_input_devices()."""
+    from fastapi.testclient import TestClient
+    from cortex_vision.audio.loopback import AudioDevice
+    from cortex_vision.server import app
+
+    monkeypatch.setattr(
+        "cortex_vision.audio.loopback.list_input_devices",
+        lambda: [
+            AudioDevice(
+                index=-1,
+                name="Desktop audio (Speakers)",
+                max_input_channels=2,
+                default_samplerate=48000.0,
+                is_default_output_loopback=True,
+            ),
+            AudioDevice(
+                index=2,
+                name="Yeti Microphone",
+                max_input_channels=2,
+                default_samplerate=44100.0,
+            ),
+        ],
+    )
+
+    with TestClient(app) as c:
+        r = c.get("/api/video/live/audio-devices")
+        assert r.status_code == 200
+        body = r.json()
+        assert "devices" in body
+        assert len(body["devices"]) == 2
+        assert body["devices"][0]["is_default_output_loopback"] is True
+        assert body["devices"][1]["name"] == "Yeti Microphone"
+
+
 def test_live_cameras_endpoint(monkeypatch):
     """/live/cameras delegates to describe_cameras()."""
     from fastapi.testclient import TestClient
