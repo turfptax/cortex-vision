@@ -4,6 +4,17 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-06
+
+### Fixed — fatal SEH crash during camera enumeration
+
+- `describe_cameras()` no longer opens `cv2.VideoCapture` on each device index to read its resolution. That probe path SEH-crashed the entire bundle on Windows when a virtual camera (DroidCam offline, OBS Virtual Camera mid-init) was in an odd state — silent process death with no Python traceback
+- New path uses `pygrabber`'s `FilterGraph.get_input_devices()`, which calls Windows' `ICreateDevEnum` directly to LIST devices by name without instantiating any of them. Safe regardless of camera state
+- Returns `{index, name}` (e.g. `"OBS Virtual Camera"`) instead of `{index, native_resolution, native_fps}`. The cortex-desktop `pickDefaultCamera()` heuristic that checks `/obs/i` against the name field now actually works
+- Falls back to the legacy cv2 probe on non-Windows or when pygrabber unavailable
+- Bundle includes pygrabber + comtypes (Windows-only deps via `sys_platform == "win32"`)
+- 6 new tests covering pygrabber path, fallback path, runtime errors, and endpoint integration
+
 ## [0.3.0] — 2026-05-06
 
 ### Added — in-app debug + LM Studio discovery

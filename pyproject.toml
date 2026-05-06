@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-vision"
-version = "0.3.0"
+version = "0.3.1"
 description = "Real-time and batch video understanding pipeline for the Cortex AI companion ecosystem"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,12 @@ dependencies = [
     "scenedetect[opencv]>=0.6.3",
     "pillow>=10.0",
     "numpy>=1.24",
+    # pygrabber: non-invasive DirectShow camera enumeration on Windows.
+    # Without this, cv2.VideoCapture probing has historically SEH-crashed
+    # the whole bundle when DroidCam / OBS Virtual Camera are in odd states.
+    # On Linux/macOS the import gracefully fails and we fall back to cv2.
+    'pygrabber>=0.2; sys_platform == "win32"',
+    'comtypes>=1.2; sys_platform == "win32"',
 ]
 
 [project.optional-dependencies]

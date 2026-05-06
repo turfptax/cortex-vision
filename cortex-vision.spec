@@ -54,6 +54,21 @@ cortex_vision_submodules = collect_submodules("cortex_vision")
 
 
 # ---------------------------------------------------------------------------
+# pygrabber + comtypes: Windows DirectShow camera enumeration.
+# pygrabber is a thin wrapper around comtypes which loads several COM modules
+# dynamically. PyInstaller's static analysis misses both paths.
+# ---------------------------------------------------------------------------
+try:
+    pygrabber_datas, pygrabber_binaries, pygrabber_hidden = collect_all("pygrabber")
+except Exception:
+    pygrabber_datas, pygrabber_binaries, pygrabber_hidden = [], [], []
+try:
+    comtypes_datas, comtypes_binaries, comtypes_hidden = collect_all("comtypes")
+except Exception:
+    comtypes_datas, comtypes_binaries, comtypes_hidden = [], [], []
+
+
+# ---------------------------------------------------------------------------
 # pydantic v2: some discriminated-union machinery loads via importlib.
 # pydantic_core is already a hard dep so it gets picked up automatically.
 # ---------------------------------------------------------------------------
@@ -115,6 +130,8 @@ a = Analysis(
     binaries=[
         *cv2_binaries,
         *scenedetect_binaries,
+        *pygrabber_binaries,
+        *comtypes_binaries,
     ],
     datas=[
         # plugin.json sits next to the .exe so the plugin manager can read it
@@ -123,6 +140,8 @@ a = Analysis(
         ("plugin.json", "."),
         *cv2_datas,
         *scenedetect_datas,
+        *pygrabber_datas,
+        *comtypes_datas,
     ],
     hiddenimports=[
         *uvicorn_hidden,
@@ -133,6 +152,8 @@ a = Analysis(
         *pydantic_hidden,
         *ytdlp_submodules,
         *ytdlp_postprocessor,
+        *pygrabber_hidden,
+        *comtypes_hidden,
     ],
     hookspath=[],
     hooksconfig={},

@@ -158,29 +158,57 @@ class FrameCapture:
 # Device discovery
 # ---------------------------------------------------------------------------
 
-def find_cameras(max_check: int = 5) -> list[int]:
-    """Probe device indices 0..max_check-1 and return those that open.
+# Why this is non-invasive: cv2.VideoCapture(i, CAP_DSHOW) actually OPENS the
+# device to probe it. With some configurations of DroidCam, OBS Virtual
+# Camera, or virtual cameras in unusual states, that open call triggers a
+# native SEH crash inside cv2's DirectShow backend that takes down the whole
+# Python process — no traceback, no graceful recovery.
+#
+# pygrabber's FilterGraph.get_input_devices() goes directly to the Windows
+# DirectShow ICreateDevEnum API and lists device names WITHOUT instantiating
+# them. It also gives us real names ("OBS Virtual Camera", "DroidCam Source")
+# instead of numeric indices, which the cortex-desktop UI's pickDefault
+# heuristic actually wants.
+#
+# We fall back to the cv2 probe only when pygrabber isn't available
+# (non-Windows, import failed) — at which point the fallback is at least
+# documented as risky.
 
-    Useful for discovering OBS Virtual Camera, USB webcams, and capture cards
-    without the user knowing the index in advance.
 
-    Note: this opens and immediately releases each device — fine on Windows
-    DirectShow, but may flash the camera LED briefly on some webcams.
+def _enumerate_via_pygrabber() -> list[dict] | None:
+    """Use Windows DirectShow's ICreateDevEnum to list devices by name.
+
+    Returns None if pygrabber isn't installed or fails. Caller falls back
+    to the cv2 probe path in that case.
     """
-    found: list[int] = []
-    for i in range(max_check):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            found.append(i)
-            cap.release()
-    return found
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+    except Exception:                                       # noqa: BLE001
+        return None
+
+    try:
+        graph = FilterGraph()
+        names = graph.get_input_devices()
+    except Exception:                                       # noqa: BLE001
+        # COM init can fail in unusual environments (services, locked-down
+        # accounts). Better to fall back than crash.
+        return None
+
+    return [
+        {
+            "index": i,
+            "name": name,
+        }
+        for i, name in enumerate(names)
+    ]
 
 
-def describe_cameras(max_check: int = 5) -> list[dict]:
-    """Like find_cameras but returns metadata per device.
+def _probe_via_cv2(max_check: int) -> list[dict]:
+    """Legacy cv2 probe — opens each device briefly to read its resolution.
 
-    Each entry: {index, native_resolution, native_fps}. Used by the
-    /api/video/live/cameras endpoint so the UI can let the user pick.
+    Used as a fallback when pygrabber isn't available. Carries the SEH-crash
+    risk documented above; the only mitigation is "don't call this on
+    Windows when pygrabber is reachable."
     """
     out: list[dict] = []
     for i in range(max_check):
@@ -199,3 +227,32 @@ def describe_cameras(max_check: int = 5) -> list[dict]:
         finally:
             cap.release()
     return out
+
+
+def describe_cameras(max_check: int = 5) -> list[dict]:
+    """Enumerate available video capture devices.
+
+    Each entry: {index, name?, native_resolution?, native_fps?}.
+
+    Path A (preferred, Windows): pygrabber's DirectShow enumeration. Returns
+    {index, name} for every device the OS knows about. NEVER opens the
+    device — safe even when DroidCam / OBS Virtual Camera are in weird
+    states.
+
+    Path B (fallback, non-Windows or pygrabber missing): cv2 probe.
+    Returns {index, native_resolution, native_fps}. Opens each device
+    briefly. Has historically crashed the bundle on Windows; only used
+    when path A is unavailable.
+
+    The UI consuming this should treat all fields as optional — only `index`
+    is guaranteed. Resolution/fps come from path B; name comes from path A.
+    """
+    via_pygrabber = _enumerate_via_pygrabber()
+    if via_pygrabber is not None:
+        return via_pygrabber
+    return _probe_via_cv2(max_check)
+
+
+def find_cameras(max_check: int = 5) -> list[int]:
+    """Indices only. Used by callers that don't need metadata."""
+    return [c["index"] for c in describe_cameras(max_check)]
