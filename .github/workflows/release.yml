@@ -93,7 +93,7 @@ jobs:
                   break
               }
               try {
-                  $health = Invoke-RestMethod -Uri "http://localhost:8005/api/video/health" -TimeoutSec 2 -ErrorAction Stop
+                  $health = Invoke-RestMethod -Uri "http://127.0.0.1:8005/api/video/health" -TimeoutSec 2 -ErrorAction Stop
                   if ($health.status -eq "ok") { break }
               } catch {
                   Start-Sleep -Milliseconds 500
