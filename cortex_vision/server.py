@@ -37,7 +37,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from cortex_vision import __version__
@@ -177,6 +177,155 @@ async def mark_pushed(session_id: str) -> None:
     if not sm.get(session_id):
         raise HTTPException(404, f"Session {session_id} not found")
     sm.mark_pushed_to_overseer(session_id)
+
+
+@app.get("/api/video/sessions/{session_id}/export.html", response_class=Response)
+async def export_session_html(session_id: str) -> Response:
+    """Render a session as a self-contained HTML report.
+
+    Output is a single .html file with base64-embedded thumbnails — shareable
+    via email, Slack, etc. without needing the cortex-vision server to be
+    running. Includes all scenes with descriptions, full transcript if
+    transcribed, and the narrative rollup.
+    """
+    sm = SessionManager(app.state.db_path)
+    session = sm.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Session {session_id} not found")
+
+    html = _render_session_html(session)
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="cortex-vision-{session_id[:8]}.html"'
+            ),
+        },
+    )
+
+
+def _render_session_html(session: VideoSession) -> str:
+    """Build a self-contained HTML report for a session. No external assets."""
+    import base64
+    import html as _html
+
+    def esc(s: str | None) -> str:
+        return _html.escape(s or "")
+
+    def img_tag(path: str | None) -> str:
+        if not path:
+            return ""
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return '<div class="missing">[keyframe missing]</div>'
+        b64 = base64.b64encode(data).decode("ascii")
+        return f'<img src="data:image/jpeg;base64,{b64}" alt="keyframe" loading="lazy">'
+
+    title = esc(session.source.get("url") or session.source.get("filename") or session.id)
+
+    started = session.started_at.strftime("%Y-%m-%d %H:%M") if session.started_at else "?"
+    duration = f"{session.duration_s:.1f}s" if session.duration_s else "—"
+    mode_label = {"file": "Processed video", "journal": "Video journal", "live": "Live capture"}.get(
+        session.mode, session.mode
+    )
+
+    scenes_html: list[str] = []
+    for s in session.scenes:
+        thumb_html = img_tag(s.keyframe_paths[0]) if s.keyframe_paths else ""
+        time_label = f"{s.start_s:0.1f}s – {s.end_s:0.1f}s"
+        spoken = (
+            f'<div class="spoken"><strong>Spoken:</strong> {esc(s.spoken_text)}</div>'
+            if s.spoken_text
+            else ""
+        )
+        scenes_html.append(f"""
+<section class="scene">
+  <div class="thumb">{thumb_html}</div>
+  <div class="body">
+    <header>
+      <span class="idx">#{s.index}</span>
+      <span class="time">{esc(time_label)}</span>
+      <span class="trigger">{esc(s.trigger_method)}</span>
+      <span class="model">{esc(s.describer_model)}</span>
+    </header>
+    <p class="desc">{esc(s.description) or '<em>(no description)</em>'}</p>
+    {spoken}
+  </div>
+</section>
+""")
+
+    transcript_html = ""
+    if session.transcript:
+        rows = [
+            f'<div class="t-row"><span class="t-time">{t.timestamp.strftime("%H:%M:%S")}</span>'
+            f'<span class="t-text">{esc(t.text)}</span></div>'
+            for t in session.transcript
+        ]
+        transcript_html = (
+            '<section class="transcript-block"><h2>Transcript</h2>'
+            + "".join(rows) + '</section>'
+        )
+
+    narrative_html = ""
+    if session.narrative:
+        narrative_html = (
+            f'<section class="narrative-block"><h2>Narrative</h2>'
+            f'<p>{esc(session.narrative)}</p></section>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Cortex Vision — {title}</title>
+<style>
+  :root {{ color-scheme: dark; --bg: #0e1015; --fg: #e2e6ec; --dim: #8a93a3;
+           --border: #1f2530; --accent: #6e8efb; }}
+  body {{ background: var(--bg); color: var(--fg); font-family: -apple-system,
+          BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; max-width: 900px;
+          margin: 24px auto; padding: 0 16px; line-height: 1.5; }}
+  h1 {{ font-size: 1.4rem; margin-bottom: 4px; word-break: break-all; }}
+  .meta {{ color: var(--dim); font-size: 0.85rem; margin-bottom: 24px; }}
+  .meta span + span {{ margin-left: 12px; }}
+  h2 {{ font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--dim); border-bottom: 1px solid var(--border);
+        padding-bottom: 6px; margin-top: 32px; }}
+  .narrative-block p {{ font-size: 1rem; }}
+  .scene {{ display: grid; grid-template-columns: 200px 1fr; gap: 16px;
+            padding: 16px 0; border-bottom: 1px solid var(--border); }}
+  .scene .thumb img {{ width: 100%; border-radius: 4px; display: block; }}
+  .scene header {{ font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; }}
+  .scene header > * + * {{ margin-left: 12px; }}
+  .scene .idx {{ color: var(--accent); font-weight: 600; }}
+  .scene .desc {{ margin: 0; }}
+  .scene .spoken {{ margin-top: 8px; padding: 8px; background: #161a22;
+                    border-radius: 4px; font-size: 0.9rem; }}
+  .t-row {{ display: flex; gap: 12px; padding: 4px 0; font-family:
+            "SF Mono", Monaco, Consolas, monospace; font-size: 0.85rem; }}
+  .t-time {{ color: var(--dim); flex-shrink: 0; }}
+  .missing {{ background: #2a1a1a; color: #c97070; padding: 16px; text-align: center;
+              border-radius: 4px; font-size: 0.8rem; }}
+  footer {{ margin-top: 48px; color: var(--dim); font-size: 0.75rem;
+            border-top: 1px solid var(--border); padding-top: 12px; }}
+</style>
+</head><body>
+<h1>{title}</h1>
+<div class="meta">
+  <span>{esc(mode_label)}</span>
+  <span>{esc(started)}</span>
+  <span>{esc(duration)}</span>
+  <span>{len(session.scenes)} scenes</span>
+  <span>session: <code>{esc(session.id[:8])}</code></span>
+</div>
+{narrative_html}
+{transcript_html}
+<section class="scenes-block"><h2>Scenes ({len(session.scenes)})</h2>
+{"".join(scenes_html) or "<p>No scenes captured.</p>"}
+</section>
+<footer>Generated by cortex-vision &nbsp;·&nbsp; {esc(session.id)}</footer>
+</body></html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -760,8 +909,21 @@ async def live_ws(websocket: WebSocket) -> None:
             # block the event loop.
             event = await loop.run_in_executor(None, pipeline.get_event, 0.5)
             if event is None:
-                # No event this tick — check if the pipeline is still running
+                # No event this tick — if the pipeline has stopped, drain
+                # any remaining events before exiting. Otherwise the
+                # final "stopped" event sits in the queue forever and the
+                # frontend's "Stopping..." spinner never resolves.
                 if not pipeline.is_running:
+                    while True:
+                        leftover = await loop.run_in_executor(
+                            None, pipeline.get_event, 0.0
+                        )
+                        if leftover is None:
+                            break
+                        try:
+                            await websocket.send_json(leftover)
+                        except WebSocketDisconnect:
+                            break
                     break
                 continue
             await websocket.send_json(event)

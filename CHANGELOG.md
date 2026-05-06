@@ -4,6 +4,19 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-05-06
+
+### Fixed
+
+- **Video Journal `FileNotFoundError`** — upload-mode sessions stored only the browser-side filename in `source.filename`. The pipeline's `Path(filename).resolve()` then landed in the bundle's CWD instead of the session dir where the file was actually saved. Pipeline now looks in `<session_dir>/source.*` for upload sessions, finds the actual saved file, and proceeds.
+- **Live mode "Stopping..." stuck forever** — race condition in the WebSocket handler. When `pipeline.is_running` flipped to false, the WS loop exited before draining the `stopped` event from the queue. Frontend never saw the terminal event, UI stuck on "Stopping...". Handler now drains all remaining queued events when the pipeline ends.
+- **Live mode describer blocking Stop** — the describer thread used the default 120s httpx timeout for LM Studio calls. If Stop was clicked mid-describe, the thread join blocked for up to 120s before the `stopped` event could fire. Reduced live-mode describer timeout to 30s — bounds Stop responsiveness without compromising the typical 5-10s SmolVLM response window.
+
+### Added
+
+- **`GET /api/video/sessions/{id}/export.html`** — render a session as a self-contained shareable HTML report. Base64-embedded thumbnails (no external image refs), narrative + per-scene descriptions + transcript if any. Single file, drop into Slack/email/anywhere.
+- 5 new tests covering upload path resolution, missing-source error path, HTML export self-containment, missing-keyframe placeholder, no-scenes export
+
 ## [0.3.3] — 2026-05-06
 
 ### Fixed — `stats.frames` field rename to match the documented contract

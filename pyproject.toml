@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-vision"
-version = "0.3.3"
+version = "0.3.4"
 description = "Real-time and batch video understanding pipeline for the Cortex AI companion ecosystem"
 readme = "README.md"
 requires-python = ">=3.10"

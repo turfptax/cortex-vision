@@ -412,6 +412,11 @@ class LivePipeline:
                 model=self.config.describer_model,
                 max_tokens=400,
                 temperature=0.2,
+                # Live mode wants responsiveness — if LM Studio takes >30s
+                # something is wrong (CUDA OOM, model swap, etc.). Shorter
+                # timeout also bounds how long a Stop click waits for the
+                # describer thread to finish its in-flight call.
+                timeout=30.0,
             )
             return description.strip(), label
         except LMStudioUnavailable as e:

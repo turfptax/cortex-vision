@@ -139,13 +139,33 @@ def run_batch_pipeline(
                 cookies_from_browser=cookies_from_browser,
                 cookies_file=cookies_file,
             )
-        elif source.get("file") or source.get("kind") == "upload":
-            file_path = source.get("file") or source.get("filename")
+        elif source.get("kind") == "upload":
+            # Upload endpoint already saved the file to <session_dir>/source.<ext>.
+            # The source dict's `filename` is just the original browser-side
+            # name (not a path), so resolving it via Path() lands in CWD and
+            # FileNotFoundErrors. Find the actual source.* in session_dir.
+            candidates = sorted(session_dir.glob("source.*"))
+            video_candidates = [
+                p for p in candidates
+                if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv"}
+            ]
+            if not video_candidates:
+                raise RuntimeError(
+                    f"Upload mode session {session_id} has no source.* in {session_dir}. "
+                    f"Upload may have failed mid-stream."
+                )
+            file_path = str(video_candidates[0])
             meta = use_local_file(file_path, session_dir=session_dir)
+            # Preserve the original filename from the browser as the title fallback
+            if not meta.get("title") and source.get("filename"):
+                meta["title"] = source["filename"]
+        elif source.get("file"):
+            # Explicit local file path (CLI / API users who pass an absolute path)
+            meta = use_local_file(source["file"], session_dir=session_dir)
         else:
             raise ValueError(
                 f"Unsupported source shape: {source!r}. "
-                f"Expected {{url: ...}} or {{file: ...}}."
+                f"Expected {{url: ...}}, {{kind: 'upload', ...}}, or {{file: ...}}."
             )
 
         logger.info(

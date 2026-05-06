@@ -95,7 +95,8 @@ def stub_describer(monkeypatch):
     """Replace the LM Studio call so the pipeline runs without a server."""
     calls: list[dict] = []
 
-    def fake_chat(text, image_paths, system, model, max_tokens, temperature):
+    def fake_chat(text, image_paths, system, model, max_tokens, temperature, **kwargs):
+        # Accept any future kwargs (e.g. timeout) without requiring fixture updates
         calls.append({"text": text, "image_paths": list(image_paths), "model": model})
         return f"Stubbed description ({len(image_paths)} keyframes)"
 

@@ -235,6 +235,73 @@ def test_batch_pipeline_audio_transcription_buckets_per_scene(isolated_db, tmp_p
     }
 
 
+def test_batch_pipeline_upload_resolves_session_dir_path(isolated_db, tmp_path):
+    """Regression: v0.3.4 fix. Upload sessions previously stored only the
+    browser-side filename in source.filename, then the pipeline resolved it
+    via Path(filename).resolve() which landed in CWD and FileNotFoundError'd.
+    Pipeline must look in session_dir for the actual saved file."""
+    from cortex_vision.pipeline.session_manager import SessionManager
+    from cortex_vision.storage import db as db_module
+
+    sm = SessionManager()
+    # Simulate what the upload endpoint does: create session, write file
+    session = sm.create(
+        mode="journal",
+        source={"kind": "upload", "filename": "journal-recording.webm"},
+    )
+    session_dir = db_module.default_artifacts_dir() / session.id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # The upload endpoint writes to <session_dir>/source.<ext>
+    saved_file = session_dir / "source.webm"
+    saved_file.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 200)  # webm magic
+
+    # Mock everything past the use_local_file step
+    fake_meta_returned = {}
+    def fake_use_local_file(file_path, session_dir):
+        # The crucial assertion: pipeline must pass the resolved path, NOT
+        # the basename "journal-recording.webm". If it passes the basename,
+        # use_local_file would FileNotFoundError on it.
+        assert Path(file_path).exists(), \
+            f"pipeline passed non-existent path {file_path!r} to use_local_file"
+        fake_meta_returned["called_with"] = file_path
+        return {
+            "file_path": str(file_path),
+            "title": "journal-recording.webm",
+            "duration_s": 10.0,
+            "platform": "file",
+        }
+
+    with patch("cortex_vision.pipeline.batch.use_local_file", fake_use_local_file), \
+         patch("cortex_vision.pipeline.batch.extract_scenes",
+               lambda *a, **kw: _fake_extracted_scenes(Path(kw["frames_dir"]), n=1)), \
+         patch("cortex_vision.pipeline.batch.chat_with_images",
+               lambda *a, **kw: "desc"), \
+         patch("cortex_vision.pipeline.batch.roll_up", lambda *a, **kw: "narrative"):
+        result = run_batch_pipeline(session.id)
+
+    assert result.status == "complete", f"pipeline failed: {result.error}"
+    # The path passed to use_local_file should be the actual saved file,
+    # not the basename
+    assert "called_with" in fake_meta_returned
+    assert "source.webm" in fake_meta_returned["called_with"]
+
+
+def test_batch_pipeline_upload_missing_source_errors_clearly(isolated_db, tmp_path):
+    """If the upload session has no source.* in the dir (upload failed mid-stream),
+    pipeline reports a clear error rather than the cryptic FileNotFoundError."""
+    from cortex_vision.pipeline.session_manager import SessionManager
+
+    sm = SessionManager()
+    session = sm.create(
+        mode="journal",
+        source={"kind": "upload", "filename": "ghost.webm"},
+    )
+    # Don't write any source file — simulate broken upload
+    result = run_batch_pipeline(session.id)
+    assert result.status == "error"
+    assert "no source" in result.error.lower() or "upload" in result.error.lower()
+
+
 def test_batch_pipeline_audio_skipped_when_ffmpeg_missing(isolated_db, tmp_path):
     """transcribe_audio=True with ffmpeg missing should skip silently — pipeline still completes."""
     from cortex_vision.pipeline.session_manager import SessionManager
