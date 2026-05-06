@@ -1,6 +1,8 @@
 # cortex-vision — Open Questions
 
-Decisions that need to be made before / during early phases. Most have been answered as of the architecture lock-in; the rest have recommended defaults.
+> **Status as of 2026-05-06 (post v0.4.0):** All 7 original questions resolved. 4 strategic items remain (not blockers). This document is preserved as a record of how the design decisions were made, not as an active decision queue.
+
+Decisions that needed to be made before / during early phases.
 
 ---
 
@@ -14,12 +16,11 @@ Public on GitHub at `turfptax/cortex-vision`. Matches the rest of the Cortex eco
 
 cortex-vision is MIT-licensed and free to install / run / modify, matching the rest of Cortex. No license server, no entitlement check, no paid tier. The plugin manager pattern in [DISTRIBUTION.md](DISTRIBUTION.md) supports gating in the future if a different plugin needs it.
 
-### 3. GPU expectation — RESOLVED: lazy model weights, two bundles
+### 3. GPU expectation — RESOLVED: CPU-only bundle, no local model loading
 
-- Two PyInstaller bundles published per release: `cortex-vision-X-windows-cpu.zip` (~500 MB) and `cortex-vision-X-windows-gpu.zip` (~2.5 GB)
-- User picks at install time (or auto-detect via `nvidia-smi`)
-- Model weights (SmolVLM, DINOv2, Parakeet, YOLO) are NOT bundled — they download lazily on first use to `%APPDATA%/Cortex/video/weights/`
-- This keeps initial install ~1 GB smaller and makes weight swaps trivial
+**As shipped (different from original plan):** v0.4.0 ships a single CPU bundle (~85 MB) and **does not load any local vision/ASR models**. All vision describer calls go through LM Studio (OpenAI-compatible HTTP); all transcription goes through cortex-desktop's bundled whisper.cpp (CPU-only, real-time on most machines).
+
+This turned out simpler than the originally-planned dual CPU/GPU bundles with lazy model downloads. We never needed local SmolVLM/DINOv2/Parakeet because LM Studio + whisper.cpp cover the same use cases. Could revisit if a future feature truly needs in-process model loading.
 
 ### 4. Distribution mechanism — RESOLVED: sidecar service + plugin manager
 
@@ -29,20 +30,17 @@ cortex-vision is its own PyInstaller .exe running on `localhost:8004`. cortex-de
 
 ## STANDING
 
-### 5. Audio transcription provider — RESOLVED: env-var-driven provider chain
+### 5. Audio transcription provider — RESOLVED: three-path chain with whisper.cpp auto-detection
 
-**Shipped in Phase 6.** Audio transcription is opt-in per session via the `transcribe_audio` flag on `POST /api/video/jobs` and `POST /api/video/jobs/upload`. Provider auto-detected at runtime via env vars:
+**Shipped in Phase 6 + v0.4.0.** Audio transcription resolves in this priority:
 
-| Env var                        | Provider                                    |
-|--------------------------------|---------------------------------------------|
-| `CORTEX_VISION_WHISPER_URL`    | LM Studio Whisper (or any OpenAI-compat)    |
-| `CORTEX_VISION_WHISPER_KEY`    | Auth key (LM Studio doesn't enforce)        |
-| `CORTEX_VISION_WHISPER_MODEL`  | Default model id (default: `whisper-1`)     |
-| `OPENAI_API_KEY`               | Fallback to OpenAI's hosted Whisper API     |
+1. Explicit URL config (env var `CORTEX_VISION_WHISPER_URL` or via `PUT /api/video/config`)
+2. cortex-desktop's bundled `whisper-cli.exe` — auto-detected at the canonical install paths (`<ProgramFiles*>\CortexHub\_internal\backend\bin\`)
+3. `OPENAI_API_KEY` for cloud Whisper
 
-If neither is set, `transcribe_audio=True` is silently ignored — the pipeline still completes with descriptions and narrative, just without `spoken_text`. ffmpeg must also be on PATH for audio extraction; missing-ffmpeg is detected and skipped non-fatally.
+The whisper.cpp auto-detection is the dominant path in practice — users who install Cortex Hub get free local transcription with zero cortex-vision config. We just read the binary cortex-desktop ships with. Zero coupling between sidecar and host's HTTP API; only shared file conventions.
 
-**Local Parakeet-TDT** (the original `[asr]` extra) is still deferred — the OpenAI-compat HTTP path covers the same use case via LM Studio loaded with a Whisper model. If Parakeet adds clear value (lower latency, GPU-only flow), it can be added as another provider in `cortex_vision/audio/transcribe.py` without touching the pipeline.
+**Local Parakeet-TDT** (the original `[asr]` extra) is permanently deferred — whisper.cpp via cortex-desktop covers the local-CPU use case at comparable latency.
 
 ### 6. Storage location — default: APPDATA
 
@@ -50,23 +48,15 @@ If neither is set, `transcribe_audio=True` is silently ignored — the pipeline 
 
 Disk budget for a typical user: ~160 MB / hour of live capture. Auto-cleanup setting added in Phase 6 ("Delete sessions older than N days").
 
-### 7. Live capture — default: support both OBS and native
+### 7. Live capture — RESOLVED: OBS-only via DirectShow enumeration
 
-**Default:** OBS Virtual Camera is the recommended path (gives the user crop/window-select/privacy-blur for free). Native Windows screen capture via `mss` is the fallback for users who don't run OBS — ~50 lines, no setup required.
+**As shipped:** OBS Virtual Camera (and other DirectShow devices like webcams, capture cards, DroidCam, Meta Quest cameras) are enumerated non-invasively via pygrabber. No native `mss` fallback in v0.4.0 — turned out users who want live screen capture already run OBS, and OBS Virtual Camera works cleanly for everything we need.
 
-Settings UI lists capture devices including:
-- `OBS Virtual Camera` (recommended)
-- `Primary monitor (native)`
-- `Webcam: <name>`
-- `Capture card: <name>`
+The picker shows real device names (e.g. "OBS Virtual Camera", "Pixel 10a (Windows Virtual Camera)") instead of numeric indices — the cortex-desktop frontend's `pickDefaultCamera()` heuristic correctly auto-selects OBS by name match.
 
-### 8. Journal mode entry point — confirm during Phase 3
+### 8. Journal mode entry point — RESOLVED: separate Video Journal tab
 
-Before Phase 3, look at `cortex-desktop/hub/frontend/src/components/overseer/` and decide:
-- Does overseer's existing journal flow have a UI button we extend? Add "Record video" next to it.
-- Or is the existing journal flow text-only? Add a separate "Video journal" tab in cortex-vision's page; bridge attaches results to today's overseer journal entry.
-
-Either way works; the bridge logic is the same.
+**As shipped:** Video Journal is its own tab in cortex-desktop's Video page, separate from the overseer's text-based journal. The post-process pipeline runs and the cortex-desktop bridge attaches the resulting scenes/transcript to today's overseer journal entry on completion. Best of both worlds — dedicated video journal UX plus integration with the existing journal model.
 
 ---
 
