@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.installed.cfg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local artifacts (runtime data — should never be committed)
+sessions/
+runs/
+captures/
+*.db
+*.db-journal
+*.wav
+*.mp4
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+!docs/**/*.jpg
+
+# Model weights (downloaded at runtime)
+weights/
+models_cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local config
+.env
+.env.local
+*.local.json

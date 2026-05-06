@@ -1,0 +1,141 @@
+# Release workflow — runs on tag push (vX.Y.Z) or manual dispatch.
+# Builds the CPU bundle on a Windows runner, computes SHA256, and attaches
+# both the .zip and the checksum to the GitHub release.
+#
+# Trigger:  git tag v0.2.0 && git push origin v0.2.0
+#
+# What cortex-desktop's plugin manager fetches:
+#   GET https://api.github.com/repos/turfptax/cortex-vision/releases/latest
+#   -> downloads cortex-vision-X.Y.Z-windows-cpu.zip from the release assets
+#   -> verifies SHA256 against cortex-vision-X.Y.Z-windows-cpu.zip.sha256
+#   -> extracts to %APPDATA%/Cortex/plugins/cortex-vision/
+#   -> spawns cortex-vision.exe
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach assets to the release
+
+jobs:
+  build-windows-cpu:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve version from tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="dev-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev,build]
+
+      - name: Run test suite (sanity check before bundling)
+        run: pytest --tb=short
+
+      - name: Build PyInstaller bundle
+        run: |
+          pyinstaller cortex-vision.spec --noconfirm --clean
+
+      - name: Verify bundle was produced
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\cortex-vision\cortex-vision.exe")) {
+            Write-Error "PyInstaller did not produce dist\cortex-vision\cortex-vision.exe"
+            exit 1
+          }
+          $size = (Get-ChildItem -Recurse "dist\cortex-vision" | Measure-Object Length -Sum).Sum
+          Write-Host "Bundle size: $([math]::Round($size / 1MB, 1)) MB"
+
+      - name: Smoke-test the bundle
+        shell: pwsh
+        run: |
+          $env:CORTEX_VISION_PORT = "8005"
+          $proc = Start-Process -FilePath "dist\cortex-vision\cortex-vision.exe" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+          try {
+            $health = Invoke-RestMethod -Uri "http://localhost:8005/api/video/health" -TimeoutSec 5
+            if ($health.status -ne "ok") { throw "Health check failed: $($health | ConvertTo-Json)" }
+            Write-Host "Smoke test passed: version $($health.version)"
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Package as zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zipName = "cortex-vision-$version-windows-cpu.zip"
+          Compress-Archive -Path "dist\cortex-vision\*" -DestinationPath $zipName
+          Write-Host "Created $zipName ($([math]::Round((Get-Item $zipName).Length / 1MB, 1)) MB)"
+
+      - name: Compute SHA256
+        id: sha
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zipName = "cortex-vision-$version-windows-cpu.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $zipName).Hash.ToLower()
+          "$hash  $zipName" | Set-Content -Path "$zipName.sha256" -Encoding ASCII
+          Write-Host "SHA256: $hash"
+          "sha=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifacts (for inspection on workflow_dispatch builds)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cortex-vision-windows-cpu
+          path: |
+            cortex-vision-*-windows-cpu.zip
+            cortex-vision-*-windows-cpu.zip.sha256
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cortex-vision-*-windows-cpu.zip
+            cortex-vision-*-windows-cpu.zip.sha256
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Cortex Vision ${{ steps.version.outputs.version }}
+
+            **Install via the Cortex Hub Plugins tab** — Settings → Plugins → Install. The Hub auto-downloads this release.
+
+            ### Manual install
+            1. Download `cortex-vision-${{ steps.version.outputs.version }}-windows-cpu.zip` below
+            2. Verify SHA256 matches `cortex-vision-${{ steps.version.outputs.version }}-windows-cpu.zip.sha256`
+            3. Extract to `%APPDATA%\Cortex\plugins\cortex-vision\`
+            4. Restart Cortex Hub
+
+            ### Configuration
+            After install, configure your vision describer URL in **Settings → Plugins → Cortex Vision**.
+
+            ---
+            SHA256: `${{ steps.sha.outputs.sha }}`

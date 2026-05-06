@@ -1,0 +1,116 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cortex-vision"
+version = "0.2.0"
+description = "Real-time and batch video understanding pipeline for the Cortex AI companion ecosystem"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "turfptax" },
+]
+keywords = ["video", "scene-detection", "vision", "llm", "cortex", "overseer"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core dependencies — required for any install.
+# These are bundled into the PyInstaller .exe; keep this list minimal.
+dependencies = [
+    "pydantic>=2.0",
+    "httpx>=0.25",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",       # FastAPI UploadFile (journal mode upload)
+    "yt-dlp>=2024.1.0",
+    "scenedetect[opencv]>=0.6.3",
+    "pillow>=10.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# CPU-only install — cloud describers (LM Studio remote, OpenRouter) recommended
+cpu = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "opencv-python-headless>=4.8",
+    "imagehash>=4.3",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+]
+
+# Full GPU install — local YOLO + Parakeet ASR + larger VLMs
+gpu = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "opencv-python-headless>=4.8",
+    "imagehash>=4.3",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+    "ultralytics>=8.0",
+    "transformers>=4.35",
+]
+
+# Optional: NVIDIA NeMo for Parakeet-TDT speech-to-text
+asr = [
+    "nemo_toolkit[asr]>=2.0",
+]
+
+# Optional: cloud describer providers
+cloud = [
+    "openai>=1.10",
+]
+
+# Development tooling
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.25",                     # for FastAPI TestClient
+    "ruff>=0.1",
+    "mypy>=1.7",
+]
+
+# Build tooling — for producing the sidecar .exe via PyInstaller
+build = [
+    "pyinstaller>=6.0",
+]
+
+# Convenience meta-extras
+all-gpu = ["cortex-vision[gpu,asr,cloud,dev]"]
+all-cpu = ["cortex-vision[cpu,cloud,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/turfptax/cortex-vision"
+"Bug Tracker" = "https://github.com/turfptax/cortex-vision/issues"
+Cortex = "https://github.com/turfptax/cortex-desktop"
+
+[project.scripts]
+# Same name pip-installs into <venv>/Scripts/cortex-vision.exe.
+# The PyInstaller bundle is a different binary that lives in
+# %APPDATA%/Cortex/plugins/cortex-vision/cortex-vision.exe.
+# Both invoke the same entry point — `cortex-vision serve` starts the sidecar.
+cortex-vision = "cortex_vision.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["cortex_vision*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

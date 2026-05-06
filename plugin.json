@@ -1,0 +1,31 @@
+{
+  "id": "cortex-vision",
+  "name": "Cortex Vision",
+  "description": "Video understanding pipeline — process recorded videos, watch your screen live, and record video journal entries that flow into the overseer.",
+  "version": "0.2.0",
+  "author": "turfptax",
+  "license": "MIT",
+  "homepage": "https://github.com/turfptax/cortex-vision",
+  "github_repo": "turfptax/cortex-vision",
+  "executable": {
+    "windows": "cortex-vision.exe",
+    "linux": "cortex-vision",
+    "darwin": "cortex-vision"
+  },
+  "default_port": 8004,
+  "api_prefix": "/api/video",
+  "health_endpoint": "/api/video/health",
+  "manifest_endpoint": "/api/video/manifest",
+  "ui": {
+    "page_id": "video",
+    "label": "Video",
+    "icon": "video",
+    "tabs": ["live", "file", "journal", "history"]
+  },
+  "capabilities": ["batch", "live", "journal"],
+  "release_assets": {
+    "windows-cpu": "cortex-vision-{version}-windows-cpu.zip",
+    "windows-gpu": "cortex-vision-{version}-windows-gpu.zip"
+  },
+  "minimum_cortex_desktop": "0.18.0"
+}
