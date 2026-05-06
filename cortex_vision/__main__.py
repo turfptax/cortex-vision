@@ -33,14 +33,21 @@ def main() -> None:
         return
 
     if cmd == "serve":
-        # Re-inject any forwarded flags for argparse in server.main()
+        # When invoked with no subcommand (`cortex-vision.exe` double-clicked
+        # or run with just env vars), argparse populates `args.cmd = None` and
+        # does NOT add the `--host/--port/--log-level` attributes — those only
+        # exist when the user explicitly typed `serve`. Use getattr with None
+        # default so the no-arg path doesn't AttributeError.
         new_argv = [sys.argv[0]]
-        if args.host is not None:
-            new_argv += ["--host", args.host]
-        if args.port is not None:
-            new_argv += ["--port", str(args.port)]
-        if args.log_level is not None:
-            new_argv += ["--log-level", args.log_level]
+        host = getattr(args, "host", None)
+        port = getattr(args, "port", None)
+        log_level = getattr(args, "log_level", None)
+        if host is not None:
+            new_argv += ["--host", host]
+        if port is not None:
+            new_argv += ["--port", str(port)]
+        if log_level is not None:
+            new_argv += ["--log-level", log_level]
         new_argv += remainder
         sys.argv = new_argv
 
