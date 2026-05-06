@@ -151,6 +151,51 @@ def test_live_pipeline_start_and_stop(isolated_db, fake_cv2_open, stub_describer
     assert any("Stubbed description" in s.description for s in described)
 
 
+def test_live_pipeline_every_event_carries_baseline_timing(
+    isolated_db, fake_cv2_open, stub_describer
+):
+    """Regression: v0.3.1 'Cannot read properties of undefined (reading
+    toLocaleString)' bug. Every event the pipeline emits must include
+    `timestamp_wall` and `elapsed_s` so the frontend can format them
+    uniformly."""
+    from cortex_vision.pipeline.live import LivePipeline, LivePipelineConfig
+    from cortex_vision.pipeline.session_manager import SessionManager
+
+    sm = SessionManager()
+    session = sm.create(mode="live", source={"kind": "obs_camera", "device": "index:0"})
+
+    config = LivePipelineConfig(
+        session_id=session.id,
+        threshold=0.95,
+        pixel_diff_threshold=10.0,
+        structural_threshold=0.1,
+        steady_interval=999.0,
+        min_scene_gap=0.0,
+    )
+    pipeline = LivePipeline(config)
+    pipeline.start()
+    time.sleep(0.6)              # let started + scene + described all fire
+    pipeline.stop(timeout=3)
+
+    events: list[dict] = []
+    while True:
+        e = pipeline.get_event(timeout=0.05)
+        if e is None:
+            break
+        events.append(e)
+
+    types = {e["type"] for e in events}
+    assert "started" in types
+    assert "stopped" in types
+
+    # CRITICAL: every event MUST have these two baseline fields
+    for e in events:
+        assert "timestamp_wall" in e, f"missing timestamp_wall on {e['type']}: {e}"
+        assert "elapsed_s" in e, f"missing elapsed_s on {e['type']}: {e}"
+        assert isinstance(e["timestamp_wall"], (int, float))
+        assert isinstance(e["elapsed_s"], (int, float))
+
+
 def test_live_pipeline_emits_started_and_stopped_events(isolated_db, fake_cv2_open, stub_describer):
     from cortex_vision.pipeline.live import LivePipeline, LivePipelineConfig
     from cortex_vision.pipeline.session_manager import SessionManager

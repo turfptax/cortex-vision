@@ -4,6 +4,21 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-05-06
+
+### Fixed — uniform timestamp fields on every WebSocket event
+
+- Live mode's `described`, `stopped`, and `error` events were missing the `timestamp_wall` and `elapsed_s` fields that `scene` and `stats` events carried. cortex-desktop's `LiveMode.tsx` formats event timestamps via `.toLocaleString()` and crashed with `Cannot read properties of undefined` whenever a `described` event arrived, taking the whole LiveMode component down (and closing the WS subscription with it). User-visible symptom: GUI blanks shortly after Start
+- `LivePipeline._emit()` now injects `timestamp_wall` and `elapsed_s` baseline fields onto every event before queueing. Caller-supplied timing wins on conflicts so per-event timestamps (e.g. scene events that captured an earlier moment) override the emit-time clock
+- New regression test asserts every event from a complete live session carries both fields with numeric values
+
+### Note for cortex-desktop frontend
+
+While this backend change closes the immediate crash, defense in depth is worth adding on your side too:
+
+1. Optional chaining on every `.toLocaleString()` / `.toFixed()` call rendering event fields (`event.elapsed_s?.toLocaleString() ?? "—"`)
+2. A React error boundary around `LiveMode` so a single render error doesn't unmount the component (and disconnect the WS) — show "Live view rendering failed; click to retry" instead
+
 ## [0.3.1] — 2026-05-06
 
 ### Fixed — fatal SEH crash during camera enumeration

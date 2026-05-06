@@ -14,17 +14,29 @@ Threads owned by a running LivePipeline:
 
 Event protocol (queued for WebSocket consumers):
 
-    {"type": "started",   "session_id": ..., "camera_index": ..., "resolution": [...]}
-    {"type": "scene",     "scene_index": 5, "change_type": "scene_change" | "update",
-                          "thumbnail_url": ..., "trigger_method": ..., "similarity": ...}
-    {"type": "described", "scene_index": 5, "description": "...", "describer_model": ...}
-    {"type": "stats",     "fps": 25.3, "frames": 1234, "scene_count": 5,
-                          "elapsed_s": 60.2, ...}
-    {"type": "stopped",   "session_id": ..., "scene_count": 12, "duration_s": 600}
-    {"type": "error",     "message": "..."}
+    EVERY event includes baseline timing fields:
+        timestamp_wall  : float (Unix seconds, time.time())
+        elapsed_s       : float (seconds since session start)
 
-WebSocket consumers should treat any future "type" values as forward-compatible
-extensions and ignore unknown ones.
+    Plus type-specific fields:
+
+    {"type": "started",   timestamp_wall, elapsed_s, session_id, camera_index,
+                          resolution, native_resolution, native_fps}
+    {"type": "scene",     timestamp_wall, elapsed_s, scene_index,
+                          change_type ("scene_change"|"update"), thumbnail_url,
+                          trigger_method, similarity}
+    {"type": "described", timestamp_wall, elapsed_s, scene_index, description,
+                          describer_model}
+    {"type": "stats",     timestamp_wall, elapsed_s, fps, frame_count,
+                          scene_count, ...}
+    {"type": "stopped",   timestamp_wall, elapsed_s, session_id, scene_count,
+                          duration_s}
+    {"type": "error",     timestamp_wall, elapsed_s, message}
+
+The uniform baseline lets WebSocket consumers safely call `.toLocaleString()`
+or similar formatting on any event without per-type undefined checks.
+Consumers should treat unknown `type` values as forward-compatible and
+ignore them.
 """
 from __future__ import annotations
 
@@ -422,9 +434,27 @@ class LivePipeline:
     # ------------------------------------------------------------------
 
     def _emit(self, event: dict) -> None:
-        """Push to the WS queue. Drops oldest if full."""
+        """Push to the WS queue. Drops oldest if full.
+
+        Injects baseline timing fields (`timestamp_wall`, `elapsed_s`) on
+        EVERY event so WS consumers can format them without worrying about
+        which event types include them. The caller-supplied event dict
+        wins on conflicts so per-event timing (e.g. a scene's actual
+        capture time) overrides the emit-time timestamp.
+        """
+        baseline = {
+            "timestamp_wall": time.time(),
+            "elapsed_s": (
+                round(time.perf_counter() - self._started_at, 1)
+                if self._started_at else 0.0
+            ),
+        }
+        # event values win — caller can override timestamps with the actual
+        # event time (e.g. scene events that happened earlier in the buffer)
+        merged = {**baseline, **event}
+
         try:
-            self._events.put_nowait(event)
+            self._events.put_nowait(merged)
         except queue.Full:
             # Drop oldest, retry once
             try:
@@ -432,7 +462,7 @@ class LivePipeline:
             except queue.Empty:
                 pass
             try:
-                self._events.put_nowait(event)
+                self._events.put_nowait(merged)
             except queue.Full:
                 pass
 
