@@ -151,6 +151,58 @@ def test_live_pipeline_start_and_stop(isolated_db, fake_cv2_open, stub_describer
     assert any("Stubbed description" in s.description for s in described)
 
 
+def test_stats_event_field_names_match_frontend_contract(
+    isolated_db, fake_cv2_open, stub_describer
+):
+    """Pin the exact field names the cortex-desktop LiveMode.tsx reads.
+
+    LiveMode.tsx renders four fields from the stats event:
+        stats.fps          — Stat label="FPS"
+        stats.frames       — Stat label="Frames" (toLocaleString)
+        stats.scene_count  — Stat label="Scenes"
+        stats.elapsed_s    — Stat label="Elapsed"
+
+    Any rename of these keys will crash the frontend with the same
+    "Cannot read properties of undefined" pattern we hit in v0.3.2.
+    Don't rename without a coordinated frontend ship.
+    """
+    from cortex_vision.pipeline.live import LivePipeline, LivePipelineConfig
+    from cortex_vision.pipeline.session_manager import SessionManager
+
+    sm = SessionManager()
+    session = sm.create(mode="live", source={"kind": "obs_camera", "device": "index:0"})
+    pipeline = LivePipeline(LivePipelineConfig(
+        session_id=session.id,
+        steady_interval=999.0, min_scene_gap=999.0,
+    ))
+    pipeline.start()
+    time.sleep(1.2)             # let at least one stats event fire (1s cadence)
+    pipeline.stop(timeout=3)
+
+    stats_events: list[dict] = []
+    while True:
+        e = pipeline.get_event(timeout=0.05)
+        if e is None:
+            break
+        if e.get("type") == "stats":
+            stats_events.append(e)
+
+    assert stats_events, "no stats events were emitted"
+    s = stats_events[0]
+
+    # Required fields the frontend reads — DO NOT RENAME without frontend ship
+    assert "fps" in s, f"stats event missing 'fps': {s}"
+    assert "frames" in s, f"stats event missing 'frames': {s}"
+    assert "scene_count" in s, f"stats event missing 'scene_count': {s}"
+    assert "elapsed_s" in s, f"stats event missing 'elapsed_s': {s}"
+
+    # Required field types — toLocaleString() / toFixed() expect numbers
+    assert isinstance(s["fps"], (int, float))
+    assert isinstance(s["frames"], int)
+    assert isinstance(s["scene_count"], int)
+    assert isinstance(s["elapsed_s"], (int, float))
+
+
 def test_live_pipeline_every_event_carries_baseline_timing(
     isolated_db, fake_cv2_open, stub_describer
 ):

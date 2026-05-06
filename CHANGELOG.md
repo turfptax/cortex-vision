@@ -4,6 +4,13 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-06
+
+### Fixed — `stats.frames` field rename to match the documented contract
+
+- `stats` event field renamed from `frame_count` to `frames` so it matches both the docstring at the top of `cortex_vision/pipeline/live.py` (always said `frames`) and what the cortex-desktop `LiveMode.tsx` actually reads on line 540: `stats.frames.toLocaleString()`. Implementation had drifted; the frontend correctly followed the documented contract; the resulting `undefined.toLocaleString()` was the actual cause of the LiveMode crash that v0.3.2 only partially fixed.
+- Added a contract test (`test_stats_event_field_names_match_frontend_contract`) pinning the four field names LiveMode reads (`fps`, `frames`, `scene_count`, `elapsed_s`) so this can never silently drift again. Future renames require a coordinated frontend ship.
+
 ## [0.3.2] — 2026-05-06
 
 ### Fixed — uniform timestamp fields on every WebSocket event

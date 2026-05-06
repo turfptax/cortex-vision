@@ -240,14 +240,21 @@ class LivePipeline:
             return None
 
     def status(self) -> dict:
-        """Snapshot for the /status endpoint."""
+        """Snapshot for the /status endpoint and the periodic `stats` WS event.
+
+        Field names here are part of the public contract documented at the top
+        of this module. Don't rename without a frontend coordination — e.g.
+        `frames` was previously called `frame_count` in the implementation
+        but was always `frames` in the protocol docstring; the rename in
+        v0.3.3 fixed that drift after the frontend hit the unmatched key.
+        """
         elapsed = time.perf_counter() - self._started_at if self._started_at else 0
         detector_stats = self._detector.stats if self._detector else {}
         return {
             "session_id": self.config.session_id,
             "is_running": self.is_running,
             "elapsed_s": round(elapsed, 1),
-            "frame_count": self._frame_count,
+            "frames": self._frame_count,                # public contract: "frames"
             "fps": round(self._capture_fps, 1),
             "scene_count": self._scene_count,
             "describer_queue_depth": self._describer_jobs.qsize(),
