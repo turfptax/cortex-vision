@@ -75,15 +75,55 @@ jobs:
         shell: pwsh
         run: |
           $env:CORTEX_VISION_PORT = "8005"
-          $proc = Start-Process -FilePath "dist\cortex-vision\cortex-vision.exe" -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-          try {
-            $health = Invoke-RestMethod -Uri "http://localhost:8005/api/video/health" -TimeoutSec 5
-            if ($health.status -ne "ok") { throw "Health check failed: $($health | ConvertTo-Json)" }
-            Write-Host "Smoke test passed: version $($health.version)"
-          } finally {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          # Capture stdout/stderr so we can surface any crash details on failure
+          New-Item -ItemType Directory -Force -Path "smoke-logs" | Out-Null
+          $proc = Start-Process `
+              -FilePath "dist\cortex-vision\cortex-vision.exe" `
+              -PassThru -WindowStyle Hidden `
+              -RedirectStandardOutput "smoke-logs\stdout.log" `
+              -RedirectStandardError  "smoke-logs\stderr.log"
+
+          # Poll up to 30s — PyInstaller --onedir bundles can take 5-15s to
+          # extract on a cold runner before the FastAPI app finishes startup.
+          $deadline = (Get-Date).AddSeconds(30)
+          $health = $null
+          while ((Get-Date) -lt $deadline) {
+              if ($proc.HasExited) {
+                  Write-Host "Bundle exited prematurely with code $($proc.ExitCode)" -ForegroundColor Red
+                  break
+              }
+              try {
+                  $health = Invoke-RestMethod -Uri "http://localhost:8005/api/video/health" -TimeoutSec 2 -ErrorAction Stop
+                  if ($health.status -eq "ok") { break }
+              } catch {
+                  Start-Sleep -Milliseconds 500
+              }
           }
+
+          try {
+              if (-not $health -or $health.status -ne "ok") {
+                  Write-Host ""
+                  Write-Host "=== Bundle stdout ===" -ForegroundColor Yellow
+                  if (Test-Path "smoke-logs\stdout.log") { Get-Content "smoke-logs\stdout.log" }
+                  Write-Host ""
+                  Write-Host "=== Bundle stderr ===" -ForegroundColor Yellow
+                  if (Test-Path "smoke-logs\stderr.log") { Get-Content "smoke-logs\stderr.log" }
+                  throw "Smoke test failed — bundle never responded to /health on port 8005"
+              }
+              Write-Host "Smoke test passed: version $($health.version)" -ForegroundColor Green
+          } finally {
+              if (-not $proc.HasExited) {
+                  Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              }
+          }
+
+      - name: Upload smoke-test logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: smoke-logs/
+          retention-days: 7
 
       - name: Package as zip
         shell: pwsh
