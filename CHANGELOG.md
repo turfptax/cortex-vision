@@ -4,6 +4,61 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-05-06
+
+### Added — local whisper.cpp transcription via cortex-desktop's install
+
+Audio transcription now has a **three-path provider chain**, with the new path being **completely automatic** for users who already have cortex-desktop's overseer set up.
+
+**Provider resolution (highest priority first):**
+
+  1. `CORTEX_VISION_WHISPER_URL` / config-file URL — explicit OpenAI-compatible endpoint
+  2. **whisper.cpp at `%APPDATA%\Cortex\whisper-cpp\`** *(NEW)* — auto-detected, uses cortex-desktop's installed binary + model directly via subprocess. Same files the overseer uses for voice journals
+  3. `OPENAI_API_KEY` — cloud Whisper API fallback
+
+**Why this matters:** users with cortex-desktop already have whisper.cpp set up for the overseer's voice journal feature. Now their `transcribe_audio: true` jobs use the same install — free local transcription with no extra config. Only users without cortex-desktop or with a custom setup need to configure anything.
+
+### Implementation details
+
+- New `find_whisper_cli()` and `find_whisper_model()` helpers detect cortex-desktop's install at the canonical `%APPDATA%\Cortex\whisper-cpp\whisper-cli.exe` and `%APPDATA%\Cortex\whisper-models\ggml-*.bin` paths. Same paths cortex-desktop's `routers/transcribe.py` treats as authoritative
+- New `_LocalWhisperCpp` endpoint type alongside the existing `_HttpEndpoint`. `transcribe_file()` dispatches by type
+- `_transcribe_via_whisper_cpp()` invokes `whisper-cli -m model -f wav.wav -oj -of base` via subprocess and parses the JSON output (millisecond offsets, different shape from OpenAI's `verbose_json`)
+- Picks the highest-accuracy model when multiple are installed (`large-v3` > `large` > `medium` > ... > `base`)
+- Zero coupling to cortex-desktop's API — we just read its binary + model files directly. If cortex-desktop isn't installed or whisper.cpp isn't set up, gracefully falls through to next path
+
+### Diagnostics
+
+`/api/video/diagnostics` now reports the **active** transcription provider with the relevant details:
+
+```jsonc
+"transcribe": {
+    "configured": true,
+    "provider": "whisper_cpp",   // or "lmstudio_compat" or "openai"
+    "cli_path": "C:\\...\\whisper-cli.exe",
+    "model_path": "C:\\...\\ggml-large-v3.bin",
+    "model": "ggml-large-v3.bin",
+    "ffmpeg_available": true
+}
+```
+
+Users can hit this to confirm which path will be used before submitting a job.
+
+### Tests — 15 new (178 total passing)
+
+- Detection helpers: missing files, present files, model preference order, missing APPDATA
+- Resolution priority: explicit URL beats whisper.cpp beats OpenAI
+- Subprocess invocation: parses whisper.cpp JSON correctly, handles non-zero exit, handles no-output-file
+- Diagnostics integration: reports the right provider info
+- Backward-compat: existing OpenAI/LM Studio path still works
+
+### Renamed (internal)
+
+- `_Endpoint` → `_HttpEndpoint` to disambiguate from the new `_LocalWhisperCpp` type
+- `_parse_response` → `_parse_http_response` (provider-specific now)
+- HTTP provider name `"lmstudio"` → `"lmstudio_compat"` for clarity
+
+These are internal symbols — public API (`transcribe_file`, `is_configured`, `bucket_segments_by_scene`, etc.) is unchanged.
+
 ## [0.3.4] — 2026-05-06
 
 ### Fixed

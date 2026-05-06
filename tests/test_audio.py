@@ -22,7 +22,7 @@ from cortex_vision.audio.transcribe import (
     TranscriptSegment,
     TranscriptionResult,
     WhisperUnavailable,
-    _parse_response,
+    _parse_http_response as _parse_response,         # renamed in v0.3.5
     _resolve_endpoint,
     bucket_segments_by_scene,
     is_configured,
@@ -140,14 +140,19 @@ def test_extract_audio_empty_output(tmp_path, monkeypatch):
 def test_resolve_endpoint_prefers_lmstudio(monkeypatch):
     monkeypatch.setenv("CORTEX_VISION_WHISPER_URL", "http://localhost:1234/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "should-not-be-used")
+    # Disable whisper.cpp detection by pointing APPDATA at an empty dir
+    monkeypatch.setenv("APPDATA", str(__import__("tempfile").mkdtemp()))
     ep = _resolve_endpoint()
-    assert ep.name == "lmstudio"
+    # Renamed in v0.3.5 from "lmstudio" to "lmstudio_compat" for clarity
+    assert ep.name == "lmstudio_compat"
     assert ep.url == "http://localhost:1234/v1/audio/transcriptions"
 
 
 def test_resolve_endpoint_openai_fallback(monkeypatch):
     monkeypatch.delenv("CORTEX_VISION_WHISPER_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
+    # Disable whisper.cpp detection by pointing APPDATA at an empty dir
+    monkeypatch.setenv("APPDATA", str(__import__("tempfile").mkdtemp()))
     ep = _resolve_endpoint()
     assert ep.name == "openai"
     assert ep.url.endswith("/audio/transcriptions")
@@ -157,6 +162,7 @@ def test_resolve_endpoint_openai_fallback(monkeypatch):
 def test_resolve_endpoint_no_provider_raises(monkeypatch):
     monkeypatch.delenv("CORTEX_VISION_WHISPER_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("APPDATA", str(__import__("tempfile").mkdtemp()))
     with pytest.raises(WhisperUnavailable):
         _resolve_endpoint()
 
@@ -164,6 +170,8 @@ def test_resolve_endpoint_no_provider_raises(monkeypatch):
 def test_is_configured(monkeypatch):
     monkeypatch.delenv("CORTEX_VISION_WHISPER_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Empty APPDATA disables the v0.3.5 whisper.cpp detection path
+    monkeypatch.setenv("APPDATA", str(__import__("tempfile").mkdtemp()))
     assert is_configured() is False
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
@@ -175,8 +183,8 @@ def test_is_configured(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _fake_endpoint():
-    from cortex_vision.audio.transcribe import _Endpoint
-    return _Endpoint(
+    from cortex_vision.audio.transcribe import _HttpEndpoint
+    return _HttpEndpoint(
         name="openai",
         url="https://api.openai.com/v1/audio/transcriptions",
         api_key="sk-fake",

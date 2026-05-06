@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
-    """Pin DB + artifacts to tmp so we don't pollute %APPDATA%."""
+    """Pin DB + artifacts to tmp so we don't pollute %APPDATA%.
+
+    Also points APPDATA itself at a fresh tmp dir so v0.3.5's whisper.cpp
+    auto-detection doesn't pick up a real install on the dev's machine
+    and confuse the provider-resolution tests.
+    """
     artifacts = tmp_path / "video"
     artifacts.mkdir()
     monkeypatch.setattr(
@@ -19,6 +24,11 @@ def isolated_db(tmp_path, monkeypatch):
         "cortex_vision.storage.db.default_artifacts_dir",
         lambda: artifacts / "sessions",
     )
+    # Empty APPDATA -> no whisper.cpp detected -> tests get deterministic
+    # provider behavior regardless of the dev's local install
+    fake_appdata = tmp_path / "AppData"
+    fake_appdata.mkdir()
+    monkeypatch.setenv("APPDATA", str(fake_appdata))
     return artifacts
 
 

@@ -17,7 +17,10 @@ from cortex_vision.audio.transcribe import (
     TranscriptSegment,
     TranscriptionResult,
     WhisperUnavailable,
+    active_provider_info,
     bucket_segments_by_scene,
+    find_whisper_cli,
+    find_whisper_model,
     is_configured,
     transcribe_file,
 )
@@ -30,7 +33,10 @@ __all__ = [
     "TranscriptSegment",
     "TranscriptionResult",
     "WhisperUnavailable",
+    "active_provider_info",
     "bucket_segments_by_scene",
+    "find_whisper_cli",
+    "find_whisper_model",
     "is_configured",
     "transcribe_file",
 ]

@@ -966,15 +966,10 @@ async def diagnostics() -> dict:
     llm_model = _default_model()
     llm_reachable = llm_health(timeout=2.0)
 
-    # Whisper (audio transcription) — resolved through config now
-    transcribe_cfg = _cfg.get_transcribe_config()
-    whisper_url = transcribe_cfg.get("url") or ""
+    # Whisper (audio transcription) — three-path provider chain
+    from cortex_vision.audio.transcribe import active_provider_info
+    whisper_info = active_provider_info()
     whisper_configured_flag = whisper_configured()
-    whisper_provider = (
-        "lmstudio_compat" if whisper_url
-        else "openai" if os.environ.get("OPENAI_API_KEY")
-        else None
-    )
 
     # Session counts by status (one query)
     counts: dict[str, int] = {}
@@ -1012,8 +1007,7 @@ async def diagnostics() -> dict:
             "reachable": llm_reachable,
         },
         "transcribe": {
-            "provider": whisper_provider,
-            "url": whisper_url or None,
+            **whisper_info,
             "configured": whisper_configured_flag,
             "ffmpeg_available": ffmpeg_available(),
         },
