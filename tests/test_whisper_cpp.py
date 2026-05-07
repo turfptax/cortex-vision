@@ -300,6 +300,53 @@ def test_transcribe_via_whisper_cpp_parses_output(_isolate_env, monkeypatch, tmp
     assert result.segments[1].end_s == 3.0
 
 
+def test_transcribe_via_whisper_cpp_passes_no_gpu_flag(_isolate_env, tmp_path):
+    """Regression: v0.4.1 fix. Without -ng, whisper.cpp tries CUDA init
+    on machines that crash natively (STATUS_FATAL_USER_CALLBACK_EXCEPTION,
+    exit 0xC000041D). The crashed subprocess plus the long blocking
+    subprocess.run causes the plugin manager's watchdog to force-restart
+    the bundle, orphaning the in-progress session."""
+    from cortex_vision.audio.transcribe import (
+        _LocalWhisperCpp,
+        _transcribe_via_whisper_cpp,
+    )
+
+    cli = _isolate_env / "Cortex" / "whisper-cpp" / "whisper-cli.exe"
+    cli.parent.mkdir(parents=True)
+    cli.write_bytes(b"x")
+    model = _isolate_env / "Cortex" / "whisper-models" / "ggml-base.bin"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"x")
+
+    endpoint = _LocalWhisperCpp(cli_path=cli, model_path=model)
+    wav = tmp_path / "audio.wav"
+    wav.write_bytes(b"RIFF")
+
+    captured_cmd: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        captured_cmd.append(list(cmd))
+        # Pretend whisper produced output
+        of_idx = cmd.index("-of")
+        Path(cmd[of_idx + 1]).with_suffix(".json").write_text(
+            '{"transcription": []}', encoding="utf-8"
+        )
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        return result
+
+    with patch("subprocess.run", fake_run):
+        _transcribe_via_whisper_cpp(endpoint, wav, language=None, timeout=30.0)
+
+    assert len(captured_cmd) == 1
+    cmd = captured_cmd[0]
+    assert "-ng" in cmd, (
+        "whisper-cli must be invoked with -ng (no-gpu) to avoid native "
+        f"CUDA init crashes. Got: {cmd}"
+    )
+
+
 def test_transcribe_via_whisper_cpp_handles_subprocess_failure(_isolate_env, tmp_path):
     """If whisper-cli exits non-zero, we raise WhisperUnavailable cleanly."""
     from cortex_vision.audio.transcribe import (

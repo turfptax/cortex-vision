@@ -4,6 +4,36 @@ All notable changes to cortex-vision will be documented in this file. Format fol
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-07
+
+### Fixed — three bugs surfaced by real-world testing on a second machine
+
+#### whisper-cli native crash on GPU init (the cascade root cause)
+
+whisper.cpp's default builds attempt CUDA initialization via ggml's GPU backend selector. On machines with mismatched CUDA toolkits, no compatible GPU, or hybrid Optimus-style setups, the GPU init crashes the subprocess natively with `STATUS_FATAL_USER_CALLBACK_EXCEPTION` (exit code `0xC000041D` / `3221225501`) — no graceful failure, no traceback in stderr.
+
+Fix: pass `-ng` (no-gpu) to whisper-cli unconditionally. CPU mode is real-time on modern cores, accuracy is identical, and we avoid every flavor of CUDA-mismatch crash. Whether the machine has a working GPU or not, we get the same fast path.
+
+This single bug had cascading effects: while `subprocess.run(whisper-cli)` blocked the asyncio event loop for ~37s, the bundle stopped responding to `/health` checks, the team's plugin manager (with `restart_on_crash: true`) thought the bundle was dead and force-restarted it, which triggered orphan-session cleanup and marked the still-running session as `error`. Fixing the GPU crash collapses the whole cascade.
+
+Regression test pinned in `tests/test_whisper_cpp.py::test_transcribe_via_whisper_cpp_passes_no_gpu_flag`.
+
+#### `AudioCapture` `paInvalidChannelCount` (-9998)
+
+Different audio hardware reports `max_output_channels` wildly — 8 for 7.1 surround, 16 for some pro audio cards, 6 for 5.1, 2 for stereo. The reported value isn't always a valid channel count for the device's current share-mode mix format. v0.4.0 passed it directly to `InputStream`, which raised `paInvalidChannelCount` on devices where the share-mode format only accepts a different count.
+
+Fix: `AudioCapture.open()` now tries a small list of channel counts in order — native first, then `2`, then `1` — and uses the first that opens successfully. The resampler is constructed AFTER the actual count is known.
+
+#### `live_stop` no longer blocks on whisper
+
+`POST /api/video/live/stop` previously waited for the entire post-process (whisper transcription + segment bucketing + persistence) before returning, sometimes 30-60 seconds for long recordings. While blocked, the bundle couldn't respond to other requests including `/health` — exactly the watchdog-trigger condition above.
+
+Fix: the endpoint now returns 200 immediately after capturing the session snapshot, with the actual `stop()` call running in a `BackgroundTask`. Frontend should treat the 200 as "stop signal accepted, cleanup in progress" and watch the WebSocket for `transcribing` / `transcribed` / `stopped` terminal events.
+
+### Tests — 197 passing (1 new regression test)
+
+- `test_transcribe_via_whisper_cpp_passes_no_gpu_flag` — pins `-ng` in the whisper invocation
+
 ## [0.4.0] — 2026-05-06
 
 ### Added — desktop audio capture in live mode + post-stop transcription

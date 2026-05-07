@@ -169,7 +169,21 @@ class AudioCapture:
     # ------------------------------------------------------------------
 
     def open(self) -> None:
-        """Start the capture stream. Raises on failure."""
+        """Start the capture stream. Raises on failure.
+
+        Channel-count negotiation: PortAudio's `paInvalidChannelCount` (-9998)
+        fires when the count we request isn't valid for the device's current
+        share mode. Different audio hardware reports `max_output_channels`
+        wildly (8 for 7.1 surround, 6 for 5.1, 2 for stereo) but the input
+        loopback typically only accepts the device's *current* mix-format
+        channel count. We try a small list of common values in order:
+
+            1. The device's reported max channels (most likely to work)
+            2. 2 (stereo — by far the most common output config)
+            3. 1 (mono — works for simple mic devices)
+
+        First match wins. If all fail, raise with the last error.
+        """
         if self._running:
             raise RuntimeError("AudioCapture already open")
 
@@ -181,18 +195,10 @@ class AudioCapture:
         # Read native format from the device
         info = sd.query_devices(device_index) if device_index is not None else sd.query_devices(sd.default.device[1])
         if is_loopback:
-            self._native_channels = int(info.get("max_output_channels", 2)) or 2
+            native_channels = int(info.get("max_output_channels", 2)) or 2
         else:
-            self._native_channels = int(info.get("max_input_channels", 1)) or 1
+            native_channels = int(info.get("max_input_channels", 1)) or 1
         self._native_samplerate = int(info.get("default_samplerate", 48000) or 48000)
-
-        # Build the resampler if native rate differs from 16k mono
-        self._resampler = _LinearResampler(
-            src_rate=self._native_samplerate,
-            src_channels=self._native_channels,
-            dst_rate=SAMPLE_RATE,
-            dst_channels=CHANNELS,
-        )
 
         # Open the WAV file for writing
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,18 +207,16 @@ class AudioCapture:
         self._wav.setsampwidth(2)        # 16-bit
         self._wav.setframerate(SAMPLE_RATE)
 
-        # Open the stream
-        kwargs: dict = {
+        # Build the kwargs once; only `channels` varies between attempts
+        base_kwargs: dict = {
             "device": device_index,
             "samplerate": self._native_samplerate,
-            "channels": self._native_channels,
             "dtype": "float32",
             "callback": self._callback,
         }
-
         if is_loopback:
             try:
-                kwargs["extra_settings"] = sd.WasapiSettings(loopback=True)
+                base_kwargs["extra_settings"] = sd.WasapiSettings(loopback=True)
             except Exception:                             # noqa: BLE001
                 # Older sounddevice / non-Windows — no loopback support
                 logger.warning(
@@ -220,10 +224,32 @@ class AudioCapture:
                     "falling back to default input device"
                 )
 
-        try:
-            self._stream = sd.InputStream(**kwargs)
-            self._stream.start()
-        except Exception:
+        # Channel-count attempts: native first, then common fallbacks. Dedup
+        # while preserving order so we don't try the same count twice.
+        candidates: list[int] = []
+        for c in (native_channels, 2, 1):
+            if c > 0 and c not in candidates:
+                candidates.append(c)
+
+        opened_channels: int | None = None
+        last_error: Exception | None = None
+
+        for channels in candidates:
+            try:
+                stream = sd.InputStream(**base_kwargs, channels=channels)
+                stream.start()
+                self._stream = stream
+                opened_channels = channels
+                break
+            except Exception as e:                        # noqa: BLE001
+                last_error = e
+                logger.info(
+                    "AudioCapture: channels=%d didn't work (%s) — trying next",
+                    channels, e,
+                )
+                continue
+
+        if opened_channels is None:
             # Clean up the half-opened WAV
             self._wav.close()
             self._wav = None
@@ -231,12 +257,25 @@ class AudioCapture:
                 self.out_path.unlink()
             except OSError:
                 pass
-            raise
+            raise RuntimeError(
+                f"Could not open audio stream with any of {candidates} channels "
+                f"on device {device_index} (loopback={is_loopback}). "
+                f"Last error: {last_error}"
+            )
+
+        # Build the resampler now that we know the actual channel count
+        self._native_channels = opened_channels
+        self._resampler = _LinearResampler(
+            src_rate=self._native_samplerate,
+            src_channels=opened_channels,
+            dst_rate=SAMPLE_RATE,
+            dst_channels=CHANNELS,
+        )
 
         self._running = True
         logger.info(
             "audio capture started: device=%s native=%dHz x %dch -> 16kHz mono -> %s",
-            device_index, self._native_samplerate, self._native_channels, self.out_path,
+            device_index, self._native_samplerate, opened_channels, self.out_path,
         )
 
     def close(self) -> None:

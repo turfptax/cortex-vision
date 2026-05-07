@@ -904,12 +904,39 @@ async def live_start(req: LiveStartRequest) -> dict:
 
 
 @app.post("/api/video/live/stop", status_code=200)
-async def live_stop() -> dict:
-    """Stop the active live session. 404 if no session is running."""
-    final = app.state.live_manager.stop()
-    if final is None:
+async def live_stop(background_tasks: BackgroundTasks) -> dict:
+    """Stop the active live session. 404 if no session is running.
+
+    v0.4.1: returns FAST. The actual stop() call (which includes
+    post-stop whisper transcription that can take 30-60 seconds for
+    long sessions) runs in a BackgroundTask. This keeps the request
+    cycle short so the plugin manager's `/health` watchdog never
+    times out and force-restarts us mid-transcription.
+
+    Clients should treat the 200 response as "stop signal accepted,
+    cleanup in progress" and watch the WebSocket `transcribing` /
+    `transcribed` / `stopped` events for the actual terminal state.
+    """
+    pipeline = app.state.live_manager.get_active()
+    if pipeline is None:
         raise HTTPException(404, "No active live session")
-    return {"stopped": True, "final_status": final}
+
+    snapshot = pipeline.status()                        # capture before stop()
+
+    def _stop_and_clear():
+        """Runs in a background thread (FastAPI's BackgroundTasks runs
+        sync functions in a threadpool). Doesn't block the event loop."""
+        try:
+            app.state.live_manager.stop()
+        except Exception:                               # noqa: BLE001
+            logger.exception("background live_manager.stop() raised")
+
+    background_tasks.add_task(_stop_and_clear)
+    return {
+        "stopped": True,
+        "final_status": snapshot,
+        "note": "post-process running in background; watch WS for terminal events",
+    }
 
 
 @app.get("/api/video/live/status")

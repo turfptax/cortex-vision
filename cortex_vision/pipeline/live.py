@@ -519,6 +519,19 @@ class LivePipeline:
 
         Failure here is non-fatal: the session still completes, just
         without transcript data. We log + emit an error event for the UI.
+
+        v0.4.1 hardening: this method runs from `stop()` which is called
+        from the FastAPI handler on the asyncio event loop. The
+        underlying `transcribe_file()` calls `subprocess.run(whisper-cli)`
+        which can block for tens of seconds. A blocked event loop means
+        no `/health` responses, which means the plugin manager's
+        watchdog thinks we're dead and force-restarts us — which orphans
+        the in-progress session. We can't easily move this onto a
+        different thread from inside `pipeline.stop()` because the call
+        graph is already synchronous, but we CAN make stop() not be
+        called from the FastAPI request handler. See server.py's
+        live_stop() for the BackgroundTask wrapping that detaches the
+        post-process from the request lifecycle.
         """
         if not whisper_configured():
             logger.info(

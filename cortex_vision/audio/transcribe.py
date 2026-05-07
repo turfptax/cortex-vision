@@ -435,6 +435,15 @@ def _transcribe_via_whisper_cpp(
         "-f", str(src),
         "-oj",
         "-of", str(output_base),
+        # CPU-only mode. Default whisper.cpp builds attempt CUDA init via
+        # ggml's GPU backend selector, and on machines with mismatched CUDA
+        # toolkits / no compatible GPU / Optimus-style hybrid setups this
+        # crashes natively (exit 0xC000041D / STATUS_FATAL_USER_CALLBACK_
+        # EXCEPTION). The crash can take down the surrounding sidecar
+        # because the long blocking subprocess + health-check timeouts
+        # trigger the plugin manager's restart_on_crash watchdog.
+        # CPU is fast enough for our use case (~real-time on modern cores).
+        "-ng",
     ]
     if language:
         cmd.extend(["-l", language])

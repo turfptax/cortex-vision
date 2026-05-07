@@ -14,7 +14,7 @@ See docs/DESIGN.md for the architecture rationale and docs/DISTRIBUTION.md for
 the install/update mechanism.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # Core schemas — exported so cortex-desktop tooling and tests can import them
 # even though the desktop runtime communicates over HTTP, not direct import.
